@@ -35,33 +35,51 @@ function pad(n: number): string {
 
 const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']
 
-// 남은 시간 "HH:MM"(1일 이상이면 "D HH:MM") + 리셋 절대시각 "MM/DD(요일) HH:MM"
-function fmtReset(resetsAt: string, now: number): string {
+type Reset = { left: string; at: string; atShort: string }
+
+// left: "HH:MM"(1일 이상이면 "D HH:MM"), at: "MM/DD(요일) HH:MM", atShort: "요일 HH:MM"
+function fmtReset(resetsAt: string, now: number): Reset | null {
   const target = Date.parse(resetsAt)
-  if (Number.isNaN(target)) return ''
+  if (Number.isNaN(target)) return null
   const diff = Math.max(0, Math.floor((target - now) / 1000))
   const days = Math.floor(diff / 86400)
   const hm = `${pad(Math.floor((diff % 86400) / 3600))}:${pad(Math.floor((diff % 3600) / 60))}`
-  const left = days > 0 ? `${days} ${hm}` : hm
   const d = new Date(target)
-  const at = `${pad(d.getMonth() + 1)}/${pad(d.getDate())}(${WEEKDAYS[d.getDay()]}) ${pad(d.getHours())}:${pad(d.getMinutes())}`
-  return `${left} · ${at}`
+  const clock = `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const wd = WEEKDAYS[d.getDay()]
+  return {
+    left: days > 0 ? `${days}d ${hm}` : hm,
+    at: `${pad(d.getMonth() + 1)}/${pad(d.getDate())}(${wd}) ${clock}`,
+    atShort: `${wd} ${clock}`,
+  }
 }
 
-// 깔끔한 원형 화살표(리셋) 아이콘: 3/4 원호 + 끝의 작은 화살촉, 회색 선
+// 폭에 따른 표시 단계: 3 넓음 → 0 아주 좁음 (viewport를 모르면 3)
+type Tier = 0 | 1 | 2 | 3
+function tierOf(columns: number | undefined): Tier {
+  if (columns === undefined) return 3
+  if (columns >= 150) return 3
+  if (columns >= 115) return 2
+  if (columns >= 85) return 1
+  return 0
+}
+const BAR_W: Record<Tier, number> = { 3: 64, 2: 40, 1: 24, 0: 0 }
+
+// Lucide "rotate-cw" (ISC): 원호 + 꺾쇠 화살촉, 24 그리드에 2px 선
 const RESET_ICON =
-  `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 16 16" fill="none" ` +
-  `stroke="#8b949e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">` +
-  `<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg>`
+  `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" ` +
+  `stroke="#8b949e" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">` +
+  `<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>`
+
 const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149', gray: '#8b949e' }
 
-// 둥근 게이지 바 (트랙은 반투명 회색이라 라이트/다크 둘 다 보임)
-function bar(pct: number, color: string): string {
-  const w = Math.max(0, Math.min(100, pct)) * 0.72
+// 둥근 게이지 바 (트랙은 반투명 회색이라 라이트/다크 둘 다 보임), 폭 가변
+function bar(pct: number, color: string, width: number): string {
+  const w = (Math.max(0, Math.min(100, pct)) / 100) * width
   const fill = HEX[color] ?? color
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="8" viewBox="0 0 72 8">` +
-    `<rect width="72" height="8" rx="4" fill="#8b949e" fill-opacity="0.25"/>` +
-    `<rect width="${w.toFixed(1)}" height="8" rx="4" fill="${fill}"/></svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="6" viewBox="0 0 ${width} 6">` +
+    `<rect width="${width}" height="6" rx="3" fill="#8b949e" fill-opacity="0.25"/>` +
+    (w > 0 ? `<rect width="${Math.max(w, 6).toFixed(1)}" height="6" rx="3" fill="${fill}"/>` : '') + `</svg>`
 }
 
 export const register: Register = on => {
@@ -105,31 +123,47 @@ export const register: Register = on => {
     const kinds = [...SLOTS, ...known.map(l => l.kind).filter(k => !SLOTS.includes(k))]
     const slots = kinds.map(kind => {
       const l = known.find(x => x.kind === kind)
-      if (!l) return { kind, label: LABELS[kind] ?? kind, pending: true, rem: 0, reset: '' }
+      if (!l) return { kind, label: LABELS[kind] ?? kind, pending: true, rem: 0, reset: null as Reset | null }
       const rem = Math.max(0, Math.round(100 - l.percentUsed))
-      return { kind, label: LABELS[kind] ?? kind, pending: false, rem, reset: l.resetsAt ? fmtReset(l.resetsAt, now) : '' }
+      return { kind, label: LABELS[kind] ?? kind, pending: false, rem, reset: l.resetsAt ? fmtReset(l.resetsAt, now) : null }
     })
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui as typeof ui & { Svg: (p: { source: string; alt: string; width?: number; height?: number }) => unknown }
-      const chip = (key: string, label: string, pct: number, color: string, value: string, sub: string, pending: boolean, resetIcon = false) => (
-        <Box key={key} flexDirection="row" alignItems="center" gap={1}>
-          <Text bold={!pending} dimColor={pending}>{label}</Text>
-          <Svg source={bar(pending ? 0 : pct, color)} alt={`${label} ${value}`} width={72} height={8} />
+      const tier = tierOf(e.viewport?.columns)
+      const barW = BAR_W[tier]
+
+      const chip = (key: string, icon: string, label: string, pct: number, color: string, value: string, pending: boolean, tail: unknown) => (
+        <Box key={key} flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
+          <Text bold={!pending} dimColor={pending}>{tier >= 2 ? `${icon} ${label}` : label}</Text>
+          {barW > 0 ? <Svg source={bar(pending ? 0 : pct, color, barW)} alt={`${label} ${value}`} width={barW} height={6} /> : null}
           <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
-          {resetIcon ? <Svg source={RESET_ICON} alt="리셋" width={11} height={11} /> : null}
-          {sub ? <Text dimColor>{sub}</Text> : null}
+          {tail}
         </Box>
       )
+
+      const resetTail = (r: Reset | null) => {
+        if (!r) return null
+        const at = tier === 3 ? r.at : tier === 2 ? r.atShort : ''
+        return (
+          <Box flexDirection="row" alignItems="center" gap={1}>
+            <Svg source={RESET_ICON} alt="리셋까지" width={12} height={12} />
+            <Text dimColor wrap="truncate">{at ? `${r.left} · ${at}` : r.left}</Text>
+          </Box>
+        )
+      }
+
       const items = slots.map(s => {
         const icon = s.kind === 'five_hour' ? '⏱' : s.kind === 'seven_day' ? '📅' : '💳'
-        return s.pending
-          ? chip(s.kind, `${icon} ${s.label}`, 0, 'gray', '–', '', true)
-          : chip(s.kind, `${icon} ${s.label}`, s.rem, remainColor(s.rem), `${s.rem}% 남음`, s.reset, false, s.reset !== '')
+        if (s.pending) return chip(s.kind, icon, s.label, 0, 'gray', '–', true, null)
+        const value = tier === 3 ? `${s.rem}% 남음` : `${s.rem}%`
+        return chip(s.kind, icon, s.label, s.rem, remainColor(s.rem), value, false, resetTail(s.reset))
       })
-      items.push(chip('ctx', '🧠 ctx', used, hasCtx ? ctxColor(used) : 'gray', hasCtx ? `${used}%` : '–', tokens, !hasCtx))
+      items.push(chip('ctx', '🧠', 'ctx', used, hasCtx ? ctxColor(used) : 'gray', hasCtx ? `${used}%` : '–', !hasCtx,
+        tier >= 2 ? <Text dimColor>{tokens}</Text> : null))
+
       return (
-        <Box flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1}>
+        <Box flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1} overflow="hidden">
           {items.flatMap((item, i) => (i === 0 ? [item] : [<Text key={`sep${i}`} dimColor>│</Text>, item]))}
         </Box>
       )
@@ -141,7 +175,7 @@ export const register: Register = on => {
           <Box key={s.kind} flexDirection="row">
             <Text dimColor>{s.label}:</Text>
             {s.pending ? <Text dimColor>–</Text> : <Text color={remainColor(s.rem)}>{s.rem}%</Text>}
-            <Text dimColor>{s.reset ? ` (${s.reset})` : ''} | </Text>
+            <Text dimColor>{s.reset ? ` (${s.reset.left} · ${s.reset.atShort})` : ''} | </Text>
           </Box>
         ))}
         <Text dimColor>ctx </Text>
