@@ -1,0 +1,7 @@
+{
+  "name": "usage-band",
+  "owner": { "name": "duddudcns" },
+  "plugins": [
+    { "name": "usage-band", "source": "./", "description": "입력창 위에 구독 사용량과 ctx%를 한 줄로 실시간 표시" }
+  ]
+}
