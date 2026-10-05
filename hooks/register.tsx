@@ -48,6 +48,11 @@ function fmtReset(resetsAt: string, now: number): string {
   return `${left} · ${at}`
 }
 
+// 깔끔한 원형 화살표(리셋) 아이콘: 3/4 원호 + 끝의 작은 화살촉, 회색 선
+const RESET_ICON =
+  `<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 16 16" fill="none" ` +
+  `stroke="#8b949e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">` +
+  `<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3.2h-3.2"/></svg>`
 const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149', gray: '#8b949e' }
 
 // 둥근 게이지 바 (트랙은 반투명 회색이라 라이트/다크 둘 다 보임)
@@ -107,11 +112,12 @@ export const register: Register = on => {
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui as typeof ui & { Svg: (p: { source: string; alt: string; width?: number; height?: number }) => unknown }
-      const chip = (key: string, label: string, pct: number, color: string, value: string, sub: string, pending: boolean) => (
+      const chip = (key: string, label: string, pct: number, color: string, value: string, sub: string, pending: boolean, resetIcon = false) => (
         <Box key={key} flexDirection="row" alignItems="center" gap={1}>
           <Text bold={!pending} dimColor={pending}>{label}</Text>
           <Svg source={bar(pending ? 0 : pct, color)} alt={`${label} ${value}`} width={72} height={8} />
           <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
+          {resetIcon ? <Svg source={RESET_ICON} alt="리셋" width={11} height={11} /> : null}
           {sub ? <Text dimColor>{sub}</Text> : null}
         </Box>
       )
@@ -119,7 +125,7 @@ export const register: Register = on => {
         const icon = s.kind === 'five_hour' ? '⏱' : s.kind === 'seven_day' ? '📅' : '💳'
         return s.pending
           ? chip(s.kind, `${icon} ${s.label}`, 0, 'gray', '–', '', true)
-          : chip(s.kind, `${icon} ${s.label}`, s.rem, remainColor(s.rem), `${s.rem}% 남음`, s.reset ? `⟳ ${s.reset}` : '', false)
+          : chip(s.kind, `${icon} ${s.label}`, s.rem, remainColor(s.rem), `${s.rem}% 남음`, s.reset, false, s.reset !== '')
       })
       items.push(chip('ctx', '🧠 ctx', used, hasCtx ? ctxColor(used) : 'gray', hasCtx ? `${used}%` : '–', tokens, !hasCtx))
       return (
