@@ -33,19 +33,19 @@ function pad(n: number): string {
   return String(n).padStart(2, '0')
 }
 
-// "HH:MM", 1일 이상이면 "D HH:MM"; 잔여 20% 이하면 "MM/DD HH:MM" 리셋 시각 추가
-function fmtReset(resetsAt: string, now: number, rem: number): string {
+const WEEKDAYS = ['일', '월', '화', '수', '목', '금', '토']
+
+// 남은 시간 "HH:MM"(1일 이상이면 "D HH:MM") + 리셋 절대시각 "MM/DD(요일) HH:MM"
+function fmtReset(resetsAt: string, now: number): string {
   const target = Date.parse(resetsAt)
   if (Number.isNaN(target)) return ''
   const diff = Math.max(0, Math.floor((target - now) / 1000))
   const days = Math.floor(diff / 86400)
   const hm = `${pad(Math.floor((diff % 86400) / 3600))}:${pad(Math.floor((diff % 3600) / 60))}`
-  let s = days > 0 ? `${days} ${hm}` : hm
-  if (rem <= LOW_REMAIN) {
-    const d = new Date(target)
-    s += `, ${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
-  }
-  return s
+  const left = days > 0 ? `${days} ${hm}` : hm
+  const d = new Date(target)
+  const at = `${pad(d.getMonth() + 1)}/${pad(d.getDate())}(${WEEKDAYS[d.getDay()]}) ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return `${left} · ${at}`
 }
 
 const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149', gray: '#8b949e' }
@@ -102,7 +102,7 @@ export const register: Register = on => {
       const l = known.find(x => x.kind === kind)
       if (!l) return { kind, label: LABELS[kind] ?? kind, pending: true, rem: 0, reset: '' }
       const rem = Math.max(0, Math.round(100 - l.percentUsed))
-      return { kind, label: LABELS[kind] ?? kind, pending: false, rem, reset: l.resetsAt ? fmtReset(l.resetsAt, now, rem) : '' }
+      return { kind, label: LABELS[kind] ?? kind, pending: false, rem, reset: l.resetsAt ? fmtReset(l.resetsAt, now) : '' }
     })
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
