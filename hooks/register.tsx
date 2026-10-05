@@ -7,6 +7,7 @@ const usage = atom({ plugin: 'usage-band', key: 'usage' } as const, null)
 
 const LABELS: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
 const LOW_REMAIN = 20
+const SLOTS = ['five_hour', 'seven_day']
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M'
@@ -47,7 +48,7 @@ function fmtReset(resetsAt: string, now: number, rem: number): string {
   return s
 }
 
-const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149' }
+const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149', gray: '#8b949e' }
 
 // 둥근 게이지 바 (트랙은 반투명 회색이라 라이트/다크 둘 다 보임)
 function bar(pct: number, color: string): string {
@@ -83,32 +84,44 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
     const u = await read($, usage)
-    if (e.props.hasSurvey || u === null) return next(e)
 
     const now = await $.clock.now()
     const ui = $.ui.resolve(e)
     const { Box, Text } = ui
-    const used = u.ctxPercent ?? 0
-    const tokens = u.ctxTokens !== undefined ? `${fmtTokens(u.ctxTokens)} / ${fmtTokens(u.ctxWindow)}` : `– / ${fmtTokens(u.ctxWindow)}`
+    const hasCtx = u?.ctxPercent !== undefined
+    const used = u?.ctxPercent ?? 0
+    const win = u ? fmtTokens(u.ctxWindow) : '–'
+    const tokens = u?.ctxTokens !== undefined ? `${fmtTokens(u.ctxTokens)} / ${win}` : `– / ${win}`
+
+    // 5h·7d는 값이 아직 없어도 자리를 잡아 두고 회색 '–'로 표시
+    const known = u?.limits ?? []
+    const kinds = [...SLOTS, ...known.map(l => l.kind).filter(k => !SLOTS.includes(k))]
+    const slots = kinds.map(kind => {
+      const l = known.find(x => x.kind === kind)
+      if (!l) return { kind, label: LABELS[kind] ?? kind, pending: true, rem: 0, reset: '' }
+      const rem = Math.max(0, Math.round(100 - l.percentUsed))
+      return { kind, label: LABELS[kind] ?? kind, pending: false, rem, reset: l.resetsAt ? fmtReset(l.resetsAt, now, rem) : '' }
+    })
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
       const { Svg } = ui as typeof ui & { Svg: (p: { source: string; alt: string; width?: number; height?: number }) => unknown }
-      const chip = (key: string, label: string, pct: number, color: string, value: string, sub: string) => (
+      const chip = (key: string, label: string, pct: number, color: string, value: string, sub: string, pending: boolean) => (
         <Box key={key} flexDirection="row" alignItems="center" gap={1}>
-          <Text bold>{label}</Text>
-          <Svg source={bar(pct, color)} alt={`${label} ${value}`} width={72} height={8} />
-          <Text color={color} bold>{value}</Text>
+          <Text bold={!pending} dimColor={pending}>{label}</Text>
+          <Svg source={bar(pending ? 0 : pct, color)} alt={`${label} ${value}`} width={72} height={8} />
+          <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
           {sub ? <Text dimColor>{sub}</Text> : null}
         </Box>
       )
-      const items = u.limits.map(l => {
-        const rem = Math.max(0, Math.round(100 - l.percentUsed))
-        const reset = l.resetsAt ? fmtReset(l.resetsAt, now, rem) : ''
-        const icon = l.kind === 'five_hour' ? '⏱' : l.kind === 'seven_day' ? '📅' : '💳'
-        return chip(l.kind, `${icon} ${LABELS[l.kind] ?? l.kind}`, rem, remainColor(rem), `${rem}% 남음`, reset ? `⟳ ${reset}` : '')
+      const items = slots.map(s => {
+        const icon = s.kind === 'five_hour' ? '⏱' : s.kind === 'seven_day' ? '📅' : '💳'
+        return s.pending
+          ? chip(s.kind, `${icon} ${s.label}`, 0, 'gray', '–', '', true)
+          : chip(s.kind, `${icon} ${s.label}`, s.rem, remainColor(s.rem), `${s.rem}% 남음`, s.reset ? `⟳ ${s.reset}` : '', false)
       })
-      items.push(chip('ctx', '🧠 ctx', used, ctxColor(used), u.ctxPercent === undefined ? '–' : `${used}%`, tokens))
+      items.push(chip('ctx', '🧠 ctx', used, hasCtx ? ctxColor(used) : 'gray', hasCtx ? `${used}%` : '–', tokens, !hasCtx))
       return (
         <Box flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1}>
           {items.flatMap((item, i) => (i === 0 ? [item] : [<Text key={`sep${i}`} dimColor>│</Text>, item]))}
@@ -118,19 +131,15 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="row">
-        {u.limits.map(l => {
-          const rem = Math.max(0, Math.round(100 - l.percentUsed))
-          const reset = l.resetsAt ? fmtReset(l.resetsAt, now, rem) : ''
-          return (
-            <Box key={l.kind} flexDirection="row">
-              <Text dimColor>{LABELS[l.kind] ?? l.kind}:</Text>
-              <Text color={remainColor(rem)}>{rem}%</Text>
-              <Text dimColor>{reset ? ` (${reset})` : ''} | </Text>
-            </Box>
-          )
-        })}
+        {slots.map(s => (
+          <Box key={s.kind} flexDirection="row">
+            <Text dimColor>{s.label}:</Text>
+            {s.pending ? <Text dimColor>–</Text> : <Text color={remainColor(s.rem)}>{s.rem}%</Text>}
+            <Text dimColor>{s.reset ? ` (${s.reset})` : ''} | </Text>
+          </Box>
+        ))}
         <Text dimColor>ctx </Text>
-        <Text color={ctxColor(used)}>{u.ctxPercent === undefined ? '–' : `${used}%`}</Text>
+        {hasCtx ? <Text color={ctxColor(used)}>{used}%</Text> : <Text dimColor>–</Text>}
         <Text dimColor> ({tokens})</Text>
       </Box>
     )
