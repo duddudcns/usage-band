@@ -85,6 +85,9 @@ function logo(png: string): string {
     `<image width="48" height="48" href="data:image/png;base64,${png}" xlink:href="data:image/png;base64,${png}"/></svg>`
 }
 
+// 두 줄 사이 2px 간격 (Box 간격은 셀 단위라 1셀이면 너무 넓음)
+const ROW_GAP = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="2"/>'
+
 // 줄 배경: 각 서비스 테마색을 아주 옅게(알파 ~18%) 깔아 라이트/다크 어디서나 파스텔 틴트로 보이게
 type RowTheme = { bg: string; label: string; logo: string; name: string }
 const CLAUDE_THEME: RowTheme = { bg: '#D977572E', label: '#D97757', logo: CLAUDE_PNG, name: 'Claude' } // Claude 테라코타
@@ -338,10 +341,10 @@ export const register: Register = on => {
       const tier = tierOf(e.viewport?.columns)
       const barW = BAR_W[tier]
 
-      // 항목 안의 라벨·게이지·퍼센트·시간은 간격 없이 붙이고, 정렬은 항목 바깥 폭(가장 긴 경우 기준)으로 맞춘다
+      // 항목 안 요소는 기본 간격으로 붙여 두고(요소별 고정 폭 없음), 정렬은 항목 바깥 폭(가장 긴 경우 기준)으로 맞춘다
       const chip = (key: string, label: string, pct: number, color: string, value: string, pending: boolean, tail: unknown, tailCells: number) => (
-        <Box key={key} flexDirection="row" alignItems="center" gap={0} flexShrink={0}
-          width={COL.label + BAR_CELLS[tier] + COL.value + tailCells}>
+        <Box key={key} flexDirection="row" alignItems="center" gap={1} flexShrink={0}
+          width={COL.label + BAR_CELLS[tier] + COL.value + tailCells + 3}>
           <Text bold={!pending} dimColor={pending}>{label}</Text>
           {barW > 0 ? <Svg source={bar(pending ? 0 : pct, color, barW)} alt={`${label} ${value}`} width={barW} height={6} /> : null}
           <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
@@ -374,6 +377,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {row('claude', 'Claude', CLAUDE_THEME, claudeItems)}
+          <Svg source={ROW_GAP} alt=" " width={1} height={2} />
           {row('codex', 'Codex', CODEX_THEME, cxSlots.map(slotChip))}
         </Box>
       )
