@@ -81,7 +81,7 @@ const RESET_CELLS: Record<Tier, number> = { 3: 26, 2: 19, 1: 8, 0: 8 }
 
 // PNG 아이콘을 SVG <image>로 감싸 데스크톱 Svg 요소로 그린다 (데스크톱 표면엔 Image 요소가 없음)
 function logo(png: string): string {
-  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="16" height="16" viewBox="0 0 48 48">` +
+  return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="13" height="13" viewBox="0 0 48 48">` +
     `<image width="48" height="48" href="data:image/png;base64,${png}" xlink:href="data:image/png;base64,${png}"/></svg>`
 }
 
@@ -364,8 +364,8 @@ export const register: Register = on => {
 
       const row = (key: string, name: string, theme: RowTheme, items: unknown[]) => (
         <Box key={key} flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1} overflow="hidden"
-          backgroundColor={theme.bg} borderStyle="round" borderColor={theme.bg} paddingX={1}>
-          <Box width={2} flexShrink={0}><Svg source={logo(theme.logo)} alt={theme.name} width={16} height={16} /></Box>
+          backgroundColor={theme.bg} borderStyle="round" borderColor={theme.bg} paddingX={1} paddingY={0}>
+          <Box width={2} flexShrink={0}><Svg source={logo(theme.logo)} alt={theme.name} width={13} height={13} /></Box>
           {items.flatMap((item, i) => (i === 0 ? [item] : [<Text key={`${key}-sep${i}`} dimColor>│</Text>, item]))}
         </Box>
       )
