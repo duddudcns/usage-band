@@ -338,18 +338,14 @@ export const register: Register = on => {
       const tier = tierOf(e.viewport?.columns)
       const barW = BAR_W[tier]
 
+      // 항목 안의 라벨·게이지·퍼센트·시간은 간격 없이 붙이고, 정렬은 항목 바깥 폭(가장 긴 경우 기준)으로 맞춘다
       const chip = (key: string, label: string, pct: number, color: string, value: string, pending: boolean, tail: unknown, tailCells: number) => (
-        <Box key={key} flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
-          <Box width={COL.label} flexShrink={0}><Text bold={!pending} dimColor={pending}>{label}</Text></Box>
-          {barW > 0 ? (
-            <Box width={BAR_CELLS[tier]} flexShrink={0}>
-              <Svg source={bar(pending ? 0 : pct, color, barW)} alt={`${label} ${value}`} width={barW} height={6} />
-            </Box>
-          ) : null}
-          <Box width={COL.value} flexShrink={0}>
-            <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
-          </Box>
-          <Box width={tailCells} flexShrink={0}>{tail}</Box>
+        <Box key={key} flexDirection="row" alignItems="center" gap={0} flexShrink={0}
+          width={COL.label + BAR_CELLS[tier] + COL.value + tailCells}>
+          <Text bold={!pending} dimColor={pending}>{label}</Text>
+          {barW > 0 ? <Svg source={bar(pending ? 0 : pct, color, barW)} alt={`${label} ${value}`} width={barW} height={6} /> : null}
+          <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
+          {tail}
         </Box>
       )
 
