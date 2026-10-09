@@ -78,10 +78,10 @@ const RESET_ICON =
   `stroke="#8b949e" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">` +
   `<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>`
 
-// 줄 배경: 각 서비스 테마색을 아주 옅게(알파 ~8%) 깔아 라이트/다크 어디서나 파스텔 틴트로 보이게
+// 줄 배경: 각 서비스 테마색을 아주 옅게(알파 ~18%) 깔아 라이트/다크 어디서나 파스텔 틴트로 보이게
 type RowTheme = { bg: string; label: string }
-const CLAUDE_THEME: RowTheme = { bg: '#D9775714', label: '#D97757' } // Claude 테라코타
-const CODEX_THEME: RowTheme = { bg: '#7B8CF514', label: '#7B8CF5' }  // Codex 블루바이올렛
+const CLAUDE_THEME: RowTheme = { bg: '#D977572E', label: '#D97757' } // Claude 테라코타
+const CODEX_THEME: RowTheme = { bg: '#7B8CF52E', label: '#7B8CF5' }  // Codex 블루바이올렛
 
 const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149', gray: '#8b949e' }
 
