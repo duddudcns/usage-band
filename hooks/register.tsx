@@ -73,6 +73,12 @@ function tierOf(columns: number | undefined): Tier {
 }
 const BAR_W: Record<Tier, number> = { 3: 64, 2: 40, 1: 24, 0: 0 }
 
+// 칸 폭 고정(셀 단위): 두 줄의 같은 항목이 같은 x에서 시작하도록, 각 단계에서 내용이 가장 길 때 기준
+// 리셋: "6d 23:59 · 10/14(화) 16:57" / "6d 23:59 · 화 16:57" / "6d 23:59"
+const COL = { label: 3, value: 4, tokens: 11 }
+const BAR_CELLS: Record<Tier, number> = { 3: 10, 2: 6, 1: 4, 0: 0 }
+const RESET_CELLS: Record<Tier, number> = { 3: 26, 2: 19, 1: 8, 0: 8 }
+
 // PNG 아이콘을 SVG <image>로 감싸 데스크톱 Svg 요소로 그린다 (데스크톱 표면엔 Image 요소가 없음)
 function logo(png: string): string {
   return `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="16" height="16" viewBox="0 0 48 48">` +
@@ -332,40 +338,42 @@ export const register: Register = on => {
       const tier = tierOf(e.viewport?.columns)
       const barW = BAR_W[tier]
 
-      const chip = (key: string, label: string, pct: number, color: string, value: string, pending: boolean, tail: unknown) => (
+      const chip = (key: string, label: string, pct: number, color: string, value: string, pending: boolean, tail: unknown, tailCells: number) => (
         <Box key={key} flexDirection="row" alignItems="center" gap={1} flexShrink={0}>
-          <Text bold={!pending} dimColor={pending}>{label}</Text>
-          {barW > 0 ? <Svg source={bar(pending ? 0 : pct, color, barW)} alt={`${label} ${value}`} width={barW} height={6} /> : null}
-          <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
-          {tail}
+          <Box width={COL.label} flexShrink={0}><Text bold={!pending} dimColor={pending}>{label}</Text></Box>
+          {barW > 0 ? (
+            <Box width={BAR_CELLS[tier]} flexShrink={0}>
+              <Svg source={bar(pending ? 0 : pct, color, barW)} alt={`${label} ${value}`} width={barW} height={6} />
+            </Box>
+          ) : null}
+          <Box width={COL.value} flexShrink={0}>
+            <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
+          </Box>
+          <Box width={tailCells} flexShrink={0}>{tail}</Box>
         </Box>
       )
 
       const resetTail = (r: Reset | null) => {
         if (!r) return null
         const at = tier === 3 ? r.at : tier === 2 ? r.atShort : ''
-        return (
-          <Box flexDirection="row" alignItems="center" gap={1}>
-            <Text dimColor wrap="truncate">{at ? `${r.left} · ${at}` : r.left}</Text>
-          </Box>
-        )
+        return <Text dimColor wrap="truncate">{at ? `${r.left} · ${at}` : r.left}</Text>
       }
 
       const slotChip = (s: Slot) => s.pending
-        ? chip(s.key, s.label, 0, 'gray', '–', true, null)
-        : chip(s.key, s.label, s.rem, remainColor(s.rem), tier === 3 ? `${s.rem}% 남음` : `${s.rem}%`, false, resetTail(s.reset))
+        ? chip(s.key, s.label, 0, 'gray', '–', true, null, RESET_CELLS[tier])
+        : chip(s.key, s.label, s.rem, remainColor(s.rem), `${s.rem}%`, false, resetTail(s.reset), RESET_CELLS[tier])
 
       const row = (key: string, name: string, theme: RowTheme, items: unknown[]) => (
         <Box key={key} flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1} overflow="hidden"
           backgroundColor={theme.bg} borderStyle="round" borderColor={theme.bg} paddingX={1}>
-          <Box flexShrink={0}><Svg source={logo(theme.logo)} alt={theme.name} width={16} height={16} /></Box>
+          <Box width={2} flexShrink={0}><Svg source={logo(theme.logo)} alt={theme.name} width={16} height={16} /></Box>
           {items.flatMap((item, i) => (i === 0 ? [item] : [<Text key={`${key}-sep${i}`} dimColor>│</Text>, item]))}
         </Box>
       )
 
       const claudeItems = claude.map(slotChip)
       claudeItems.push(chip('ctx', 'ctx', used, hasCtx ? ctxColor(used) : 'gray', hasCtx ? `${used}%` : '–', !hasCtx,
-        tier >= 2 ? <Text dimColor>{tokens}</Text> : null))
+        tier >= 2 ? <Text dimColor>{tokens}</Text> : null, tier >= 2 ? COL.tokens : 0))
 
       return (
         <Box flexDirection="column">
