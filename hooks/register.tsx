@@ -86,7 +86,7 @@ function logo(png: string): string {
 }
 
 // 두 줄 사이 2px 간격 (Box 간격은 셀 단위라 1셀이면 너무 넓음)
-const ROW_GAP = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="2"/>'
+const ROW_GAP = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="3" viewBox="0 0 8 3"><rect width="8" height="3" fill="#000" fill-opacity="0"/></svg>'
 
 // 줄 배경: 각 서비스 테마색을 아주 옅게(알파 ~18%) 깔아 라이트/다크 어디서나 파스텔 틴트로 보이게
 type RowTheme = { bg: string; label: string; logo: string; name: string }
@@ -377,7 +377,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {row('claude', 'Claude', CLAUDE_THEME, claudeItems)}
-          <Svg source={ROW_GAP} alt=" " width={1} height={2} />
+          <Svg source={ROW_GAP} alt="줄 간격" width={8} height={3} />
           {row('codex', 'Codex', CODEX_THEME, cxSlots.map(slotChip))}
         </Box>
       )
