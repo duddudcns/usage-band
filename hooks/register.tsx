@@ -364,7 +364,7 @@ export const register: Register = on => {
 
       const row = (key: string, name: string, theme: RowTheme, items: unknown[]) => (
         <Box key={key} flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1} overflow="hidden"
-          backgroundColor={theme.bg} borderStyle="round" borderColor={theme.bg} paddingX={1} paddingY={0}>
+          backgroundColor={theme.bg} paddingX={1} paddingY={0}>
           <Box width={2} flexShrink={0}><Svg source={logo(theme.logo)} alt={theme.name} width={13} height={13} /></Box>
           {items.flatMap((item, i) => (i === 0 ? [item] : [<Text key={`${key}-sep${i}`} dimColor>│</Text>, item]))}
         </Box>
