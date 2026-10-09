@@ -78,6 +78,11 @@ const RESET_ICON =
   `stroke="#8b949e" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">` +
   `<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>`
 
+// 줄 배경: 각 서비스 테마색을 아주 옅게(알파 ~8%) 깔아 라이트/다크 어디서나 파스텔 틴트로 보이게
+type RowTheme = { bg: string; label: string }
+const CLAUDE_THEME: RowTheme = { bg: '#D9775714', label: '#D97757' } // Claude 테라코타
+const CODEX_THEME: RowTheme = { bg: '#7B8CF514', label: '#7B8CF5' }  // Codex 블루바이올렛
+
 const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149', gray: '#8b949e' }
 
 // 둥근 게이지 바 (트랙은 반투명 회색이라 라이트/다크 둘 다 보임), 폭 가변
@@ -351,9 +356,10 @@ export const register: Register = on => {
         ? chip(s.key, s.icon, s.label, 0, 'gray', '–', true, null)
         : chip(s.key, s.icon, s.label, s.rem, remainColor(s.rem), tier === 3 ? `${s.rem}% 남음` : `${s.rem}%`, false, resetTail(s.reset))
 
-      const row = (key: string, name: string, items: unknown[]) => (
-        <Box key={key} flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1} overflow="hidden">
-          <Box width={6} flexShrink={0}><Text dimColor bold>{name}</Text></Box>
+      const row = (key: string, name: string, theme: RowTheme, items: unknown[]) => (
+        <Box key={key} flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1} overflow="hidden"
+          backgroundColor={theme.bg} paddingX={1}>
+          <Box width={6} flexShrink={0}><Text color={theme.label} bold>{name}</Text></Box>
           {items.flatMap((item, i) => (i === 0 ? [item] : [<Text key={`${key}-sep${i}`} dimColor>│</Text>, item]))}
         </Box>
       )
@@ -364,15 +370,15 @@ export const register: Register = on => {
 
       return (
         <Box flexDirection="column">
-          {row('claude', 'Claude', claudeItems)}
-          {row('codex', 'Codex', cxSlots.map(slotChip))}
+          {row('claude', 'Claude', CLAUDE_THEME, claudeItems)}
+          {row('codex', 'Codex', CODEX_THEME, cxSlots.map(slotChip))}
         </Box>
       )
     }
 
-    const textRow = (key: string, name: string, slots: Slot[], extra: unknown) => (
+    const textRow = (key: string, name: string, theme: RowTheme, slots: Slot[], extra: unknown) => (
       <Box key={key} flexDirection="row">
-        <Text dimColor bold>{name.padEnd(7)}</Text>
+        <Text color={theme.label} bold>{name.padEnd(7)}</Text>
         {slots.map((s, i) => (
           <Box key={s.key} flexDirection="row">
             <Text dimColor>{i > 0 ? ' | ' : ''}{s.label}:</Text>
@@ -386,14 +392,14 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {textRow('claude', 'Claude', claude, (
+        {textRow('claude', 'Claude', CLAUDE_THEME, claude, (
           <Box flexDirection="row">
             <Text dimColor> | ctx </Text>
             {hasCtx ? <Text color={ctxColor(used)}>{used}%</Text> : <Text dimColor>–</Text>}
             <Text dimColor> ({tokens})</Text>
           </Box>
         ))}
-        {textRow('codex', 'Codex', cxSlots, null)}
+        {textRow('codex', 'Codex', CODEX_THEME, cxSlots, null)}
       </Box>
     )
   })
