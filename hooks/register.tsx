@@ -31,6 +31,23 @@ function remainColor(rem: number): string {
   return 'red'
 }
 
+// 페이스 기준 색: 창을 같은 단위로 나눠(5h=1시간×5, 7d=1일×7) 지금 지나고 있는 단위가 끝날 때
+// 남아 있어야 할 몫 이상이면 초록, 모자라면 노랑. 시간과 무관하게 20% 미만이면 빨강.
+// 예) 5h 창에서 1~2시간째 → 100 - 2×20 = 60% 이상이면 초록.
+const PACE: Record<string, { units: number; unitMs: number }> = {
+  '5h': { units: 5, unitMs: 3_600_000 },
+  '7d': { units: 7, unitMs: 86_400_000 },
+}
+
+function paceColor(rem: number, windowId: string, resetMs: number | null, now: number): string {
+  if (rem < LOW_REMAIN) return 'red'
+  const pace = PACE[windowId]
+  if (!pace || resetMs === null || !Number.isFinite(resetMs)) return remainColor(rem)
+  const elapsed = pace.units * pace.unitMs - Math.max(0, resetMs - now)
+  const unit = Math.min(pace.units - 1, Math.max(0, Math.floor(elapsed / pace.unitMs)))
+  const shouldRemain = 100 - ((unit + 1) * 100) / pace.units
+  return rem >= shouldRemain ? 'green' : 'yellow'
+}
 // 컨텍스트는 사용 % 기준 색
 function ctxColor(used: number): string {
   if (used < 50) return 'green'
@@ -263,10 +280,10 @@ async function refreshCodex($: EngineInterface): Promise<void> {
 
 // ---- 표시용 슬롯 ----
 
-type Slot = { key: string; label: string; pending: boolean; rem: number; reset: Reset | null }
+type Slot = { key: string; label: string; pending: boolean; rem: number; color: string; reset: Reset | null }
 
 function pendingSlot(key: string, label: string): Slot {
-  return { key, label, pending: true, rem: 0, reset: null }
+  return { key, label, pending: true, rem: 0, color: 'gray', reset: null }
 }
 
 function codexSlots(c: CodexUsage | null, now: number): Slot[] {
@@ -278,6 +295,7 @@ function codexSlots(c: CodexUsage | null, now: number): Slot[] {
       if (!w) return pendingSlot(`cx${i}-${id}`, `${tag}${label}`)
       const rem = Math.max(0, Math.round(100 - w.usedPercent))
       return { key: `cx${i}-${id}`, label: `${tag}${label}`, pending: false, rem,
+        color: paceColor(rem, id, w.resetsAt ? w.resetsAt * 1000 : null, now),
         reset: w.resetsAt ? fmtReset(w.resetsAt * 1000, now) : null }
     }
     return [mk(a.fiveHour, '5h', '5h'), mk(a.weekly, '7d', '7d')]
@@ -332,7 +350,8 @@ export const register: Register = on => {
       const l = known.find(x => x.kind === kind)
       if (!l) return pendingSlot(kind, label)
       const rem = Math.max(0, Math.round(100 - l.percentUsed))
-      return { key: kind, label, pending: false, rem, reset: l.resetsAt ? fmtReset(Date.parse(l.resetsAt), now) : null }
+      const resetMs = l.resetsAt ? Date.parse(l.resetsAt) : null
+      return { key: kind, label, pending: false, rem, color: paceColor(rem, label, resetMs, now), reset: resetMs !== null ? fmtReset(resetMs, now) : null }
     })
     const cxSlots = codexSlots(cx, now)
 
@@ -360,7 +379,7 @@ export const register: Register = on => {
 
       const slotChip = (s: Slot) => s.pending
         ? chip(s.key, s.label, 0, 'gray', '–', true, null, RESET_CELLS[tier])
-        : chip(s.key, s.label, s.rem, remainColor(s.rem), `${s.rem}%`, false, resetTail(s.reset), RESET_CELLS[tier])
+        : chip(s.key, s.label, s.rem, s.color, `${s.rem}%`, false, resetTail(s.reset), RESET_CELLS[tier])
 
       const row = (key: string, name: string, theme: RowTheme, items: unknown[]) => (
         <Box key={key} flexDirection="row" flexWrap="nowrap" alignItems="center" gap={1} overflow="hidden"
@@ -389,7 +408,7 @@ export const register: Register = on => {
         {slots.map((s, i) => (
           <Box key={s.key} flexDirection="row">
             <Text dimColor>{i > 0 ? ' | ' : ''}{s.label}:</Text>
-            {s.pending ? <Text dimColor>–</Text> : <Text color={remainColor(s.rem)}>{s.rem}%</Text>}
+            {s.pending ? <Text dimColor>–</Text> : <Text color={s.color}>{s.rem}%</Text>}
             <Text dimColor>{s.reset ? ` (${s.reset.left} · ${s.reset.atShort})` : ''}</Text>
           </Box>
         ))}
