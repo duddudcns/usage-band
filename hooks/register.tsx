@@ -1,11 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { CodexAccount, CodexUsage, CodexWindow } from '../types'
+import type { ClaudeLimits, CodexAccount, CodexUsage, CodexWindow, Usage } from '../types'
 import { CLAUDE_PNG, CODEX_PNG } from './logos'
 
 const usage = atom({ plugin: 'usage-band', key: 'usage' } as const, null)
+const claudeApi = atom({ plugin: 'usage-band', key: 'claude' } as const, null)
 const codex = atom({ plugin: 'usage-band', key: 'codex' } as const, null)
+
+// Claude 사용량: 앱 사용량 화면과 같은 출처(/api/oauth/usage)를 직접 조회.
+// 엔진이 넘기는 값(응답 헤더)은 정수로 잘린 값이라 앱보다 1%p 낮게 나오고, 응답이 있을 때만 갱신된다.
+const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
+const CLAUDE_STALE_MS = 5 * 60_000 // 이보다 오래된 조회 결과는 버리고 엔진 값으로 돌아간다
 
 const LABELS: Record<string, string> = { five_hour: '5h', seven_day: '7d', spend_limit: 'spend' }
 const LOW_REMAIN = 20
@@ -278,6 +284,135 @@ async function refreshCodex($: EngineInterface): Promise<void> {
   if (next) await update($, codex, () => next)
 }
 
+// ---- Claude ----
+
+// "2026-10-13T17:00:00.259394+00:00"처럼 소수 6자리 ISO는 런타임에 따라 Date.parse가 NaN을 낼 수 있어 3자리로 자른다
+function parseIso(v: unknown): number | null {
+  if (typeof v !== 'string') return null
+  const ms = Date.parse(v.replace(/(\.\d{3})\d+/, '$1'))
+  return Number.isFinite(ms) ? ms : null
+}
+
+// /api/oauth/usage 응답 → limits. utilization은 이미 0~100 단위
+export function parseClaudeUsage(data: Record<string, unknown>): Usage['limits'] {
+  const out: Usage['limits'] = []
+  for (const kind of SLOTS) {
+    const w = data[kind] as Record<string, unknown> | null | undefined
+    const used = num(w?.utilization)
+    if (!w || used === null) continue
+    const resetMs = parseIso(w.resets_at)
+    out.push({ kind, percentUsed: Math.max(0, Math.min(100, used)), ...(resetMs !== null && { resetsAt: new Date(resetMs).toISOString() }) })
+  }
+  return out
+}
+
+// 자격증명은 엔진이 쥐고 핸들만 준다(비밀값은 플러그인에 오지 않고, 퍼스트파티 호스트에만 쓰이며, 트래픽 차단 정책도 엔진이 지킨다).
+async function fetchClaude($: EngineInterface): Promise<ClaudeLimits | null> {
+  const auth = await $.session.authorize()
+  // 로그인 없음·3P 제공자·게이트웨이·API 키(이 엔드포인트는 구독 OAuth 전용): 엔진 값으로 표시.
+  // 이전 계정의 조회 값이 남아 계속 보이지 않게 비운다.
+  if (auth?.kind !== 'bearer') {
+    await update($, claudeApi, () => null)
+    return null
+  }
+  const res = await $.http.fetch(CLAUDE_USAGE_URL, {
+    method: 'GET',
+    headers: { 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' },
+    auth: auth.handle,
+  })
+  if (!res.ok) return null
+  const limits = parseClaudeUsage(JSON.parse(res.text))
+  return limits.length > 0 ? { fetchedAt: await $.clock.now(), limits } : null
+}
+
+const CLAUDE_BACKOFF_MS = 5 * 60_000 // 실패(401·429·네트워크) 뒤에는 5분 쉬고 다시 시도
+let claudeRetryAt = 0
+// fetch엔 타임아웃이 없어 진행 중 요청 위에 새 요청이 쌓이지 않게 막되, 끝내 안 오는 요청은 2분 뒤 포기한다
+const CLAUDE_INFLIGHT_MAX_MS = 2 * 60_000
+let claudeInFlightSince = 0
+
+async function refreshClaude($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  if (now < claudeRetryAt || now - claudeInFlightSince < CLAUDE_INFLIGHT_MAX_MS) return
+  claudeInFlightSince = now
+  try {
+    const next = await fetchClaude($).catch(() => null)
+    if (next) await update($, claudeApi, () => next)
+    else claudeRetryAt = now + CLAUDE_BACKOFF_MS
+  } finally {
+    claudeInFlightSince = 0
+  }
+}
+
+// ctx는 서버 출처가 없다. 분모는 /context와 같은 자동 압축 창(rawMaxTokens)이고, 그 창은 'summary' 분석
+// (대화 전체 추정)으로만 알 수 있어 1분마다 잰다. 분자는 마지막 응답의 입력 토큰(엔진 값, 실측상 분석 추정과 0.1% 이내).
+// 엔진의 session.measure는 턴마다 한 번 정도만 오지만 토큰 값은 응답 단계마다 바뀐다(실측) → 짧게 읽는다.
+// 분석 없는 $.session.usage()는 계산 없는 호출이고, 값이 같으면 쓰지 않아 다시 그리지도 않는다.
+const CTX_POLL_MS = 5_000
+let ctxWindowBasis: number | null = null // 모듈이 다시 올라오면 비지만 다음 1분 분석에서 다시 채워진다
+
+type EngineUsage = Awaited<ReturnType<EngineInterface['session']['usage']>>
+
+function sameUsage(a: Usage, b: Usage): boolean {
+  return a.ctxPercent === b.ctxPercent && a.ctxTokens === b.ctxTokens && a.ctxWindow === b.ctxWindow
+    && JSON.stringify(a.limits) === JSON.stringify(b.limits)
+}
+
+type EngineReading = {
+  tokens?: number
+  window: number // 분모(자동 압축 창 또는 모델 창)
+  percent?: number // 엔진이 계산한 %(tokens가 없을 때만 씀)
+  limits: Usage['limits'] // 비어 있으면 이전 값을 유지
+}
+
+// prev + 엔진 값 → 다음 상태. fromResponse(새 응답 헤더, session.measure)일 때만 limitsAt을 찍고, 뒤로 가지 않게 한다.
+export function buildUsage(prev: Usage | null | undefined, r: EngineReading, fromResponse: boolean, now: number): Usage {
+  const hasLimits = r.limits.length > 0
+  return {
+    ctxPercent: r.tokens !== undefined && r.window > 0 ? Math.round((r.tokens / r.window) * 100) : r.percent,
+    ctxTokens: r.tokens,
+    ctxWindow: r.window,
+    limits: hasLimits ? r.limits : prev?.limits ?? [],
+    limitsAt: hasLimits && fromResponse ? Math.max(prev?.limitsAt ?? 0, now) : prev?.limitsAt ?? 0,
+  }
+}
+
+async function applyEngineUsage($: EngineInterface, u: Pick<EngineUsage, 'context' | 'rateLimits'>, fromResponse: boolean): Promise<void> {
+  const breakdownWindow = u.context.breakdown?.rawMaxTokens
+  if (breakdownWindow && breakdownWindow > 0) ctxWindowBasis = breakdownWindow
+  const reading: EngineReading = {
+    tokens: u.context.tokens,
+    window: ctxWindowBasis ?? u.context.window,
+    percent: u.context.percent,
+    limits: u.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
+  }
+  const now = await $.clock.now()
+  // 같은 값을 다시 쓰면 읽는 쪽이 다시 그려지므로 아예 쓰지 않는다
+  const cur = await read($, usage)
+  const probe = buildUsage(cur, reading, fromResponse, now)
+  if (cur && sameUsage(cur, probe) && cur.limitsAt === probe.limitsAt) return
+  // 계산은 update 안에서 최신 값(prev) 기준으로 다시 한다: 그 사이 다른 쓰기가 끼어도 덮어쓰지 않도록
+  await update($, usage, prev => buildUsage(prev, reading, fromResponse, now))
+}
+
+async function measureCtx($: EngineInterface, withBreakdown: boolean): Promise<void> {
+  await applyEngineUsage($, await $.session.usage(withBreakdown ? { breakdown: 'summary' } : undefined), false)
+}
+
+// 표시할 5h·7d: 직접 조회 값이 5분 안이면 그것, 그보다 오래됐으면 엔진 값과 비교해 더 새 쪽.
+// 직접 조회가 채운 창은 그것으로, 나머지(spend 등)는 엔진 값으로 채운다.
+export function pickLimits(engine: Usage | null, api: ClaudeLimits | null, now: number): Usage['limits'] {
+  const engineLimits = engine?.limits ?? []
+  const useApi = api && (now - api.fetchedAt < CLAUDE_STALE_MS || api.fetchedAt >= (engine?.limitsAt ?? 0))
+  if (!useApi) return engineLimits
+  return [...api.limits, ...engineLimits.filter(l => !api.limits.some(a => a.kind === l.kind))]
+}
+
+// 1분 주기 작업. 하나가 실패해도 나머지는 돈다.
+async function refreshAll($: EngineInterface): Promise<void> {
+  await Promise.allSettled([measureCtx($, true), refreshClaude($), refreshCodex($)])
+}
+
 // ---- 표시용 슬롯 ----
 
 type Slot = { key: string; label: string; pending: boolean; rem: number; color: string; reset: Reset | null }
@@ -305,33 +440,25 @@ function codexSlots(c: CodexUsage | null, now: number): Slot[] {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    const u = await $.session.usage()
-    await update($, usage, () => ({
-      ctxPercent: u.context.percent,
-      ctxTokens: u.context.tokens,
-      ctxWindow: u.context.window,
-      limits: u.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
-    }))
-    await refreshCodex($)
-    $.clock.every(CODEX_POLL_MS, () => refreshCodex($))
+    // isInteractive로 거르지 않는다: 데스크톱 Code 탭은 SDK로 뜬 세션이라 false일 수 있다
+    // 타이머 먼저 등록하고, 첫 조회는 기다리지 않는다(첫 프롬프트를 늦추지 않도록)
+    $.clock.every(CODEX_POLL_MS, () => { void refreshAll($) })
+    $.clock.every(CTX_POLL_MS, () => { void measureCtx($, false).catch(() => undefined) })
+    void refreshAll($)
     return r
   })
 
+  // 엔진 알림 값은 그대로 반영만 한다(턴마다 한 번 정도 옴, 분석·서버 조회는 타이머 몫)
   on('session.measure', async ($, e, next) => {
     const r = await next(e)
-    await update($, usage, () => ({
-      ctxPercent: e.context.percent,
-      ctxTokens: e.context.tokens,
-      ctxWindow: e.context.window,
-      limits: e.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
-    }))
-    await refreshCodex($)
+    await applyEngineUsage($, e, true).catch(() => undefined)
     return r
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const u = await read($, usage)
+    const api = await read($, claudeApi)
     const cx = await read($, codex)
 
     const now = await $.clock.now()
@@ -343,7 +470,7 @@ export const register: Register = on => {
     const tokens = u?.ctxTokens !== undefined ? `${fmtTokens(u.ctxTokens)} / ${win}` : `– / ${win}`
 
     // 5h·7d는 값이 아직 없어도 자리를 잡아 두고 회색 '–'로 표시
-    const known = u?.limits ?? []
+    const known = pickLimits(u, api, now)
     const kinds = [...SLOTS, ...known.map(l => l.kind).filter(k => !SLOTS.includes(k))]
     const claude: Slot[] = kinds.map(kind => {
       const label = LABELS[kind] ?? kind
