@@ -9,7 +9,7 @@ Claude Code mod: 입력창 바로 위에 구독 사용량(5h / 7d 남은 %, 리�
 
 | 항목 | 출처 | 갱신 |
 |---|---|---|
-| Claude 5h·7d | `https://api.anthropic.com/api/oauth/usage` 직접 조회(앱 사용량 화면과 같은 값). 인증은 `$.session.authorize()` 핸들이라 토큰이 mod에 오지 않음 | 1분. 실패하면 5분 쉬고 재시도, 그동안은 엔진 값 |
+| Claude 5h·7d | `https://api.anthropic.com/api/oauth/usage` 직접 조회(앱 사용량 화면과 같은 값). 인증은 `$.session.authorize()` 핸들이라 토큰이 mod에 오지 않음 | 같은 설정 폴더의 모든 세션이 `usage-band-claude.json` 하나를 공유해 전체 1분 1회. 실패(429 등)면 2분부터 두 배씩 최대 30분 쉼(Retry-After 우선), 그동안은 마지막 값 또는 엔진 값 |
 | ctx | 분자: 마지막 응답의 입력 토큰. 분모: `/context`와 같은 자동 압축 창(`breakdown: 'summary'`) | 5초(값이 바뀔 때만 다시 그림). 분모는 1분 |
 | Codex 5h·7d | `chatgpt.com/backend-api/wham/usage` | 1분 |
 

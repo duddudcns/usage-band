@@ -306,42 +306,138 @@ export function parseClaudeUsage(data: Record<string, unknown>): Usage['limits']
   return out
 }
 
+// 이 엔드포인트는 요청 제한이 빡빡하다: 세션마다 1분 조회하면 세션 수만큼 늘어 429가 났다(실측).
+// 그래서 같은 설정 폴더의 모든 세션(프로세스)이 파일 하나를 함께 쓴다. 전체에서 1분에 한 번만 서버에 묻고, 나머지는 파일을 읽는다.
+// 파일엔 토큰이 없다(사용률·리셋 시각·다음 조회 가능 시각뿐).
+const CLAUDE_POLL_MS = 60_000
+const CLAUDE_BACKOFF_MIN_MS = 2 * 60_000
+const CLAUDE_BACKOFF_MAX_MS = 30 * 60_000
+const CLAUDE_RETRY_AFTER_MAX_MS = 60 * 60_000 // 서버가 준 대기 시간은 존중하되 1시간을 넘기지 않는다
+const CLAUDE_INFLIGHT_MAX_MS = 2 * 60_000 // fetch엔 타임아웃이 없어, 끝내 안 오는 요청은 2분 뒤 포기한 것으로 본다
+
+export type ClaudeCache = { fetchedAt?: number; limits?: Usage['limits']; nextAt?: number; backoffMs?: number; claim?: string }
+
+// 실패 뒤 대기: 2분부터 두 배씩 최대 30분. Retry-After(초)가 더 길면 그만큼(최대 1시간)
+export function nextBackoff(prevMs: number | undefined, retryAfterSec: number | null): number {
+  const doubled = Math.min(CLAUDE_BACKOFF_MAX_MS, Math.max(CLAUDE_BACKOFF_MIN_MS, (prevMs ?? 0) * 2))
+  if (retryAfterSec === null || retryAfterSec <= 0) return doubled
+  return Math.max(doubled, Math.min(CLAUDE_RETRY_AFTER_MAX_MS, retryAfterSec * 1000))
+}
+
+// 파일은 다른 프로세스가 쓰다 만 것일 수도, 손으로 고친 것일 수도 있어 모양을 검사하고 시각을 자른다
+export function sanitizeCache(raw: unknown, now: number): ClaudeCache {
+  if (!raw || typeof raw !== 'object') return {}
+  const r = raw as Record<string, unknown>
+  const n = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+  const limits = Array.isArray(r.limits)
+    ? (r.limits as Record<string, unknown>[]).filter(l => l && typeof l.kind === 'string' && n(l.percentUsed) !== undefined)
+      .map(l => ({ kind: l.kind as string, percentUsed: l.percentUsed as number, ...(typeof l.resetsAt === 'string' && { resetsAt: l.resetsAt }) }))
+    : undefined
+  const nextAt = n(r.nextAt)
+  const fetchedAt = n(r.fetchedAt)
+  return {
+    // 미래 시각(시계가 뒤로 감·손으로 고친 파일)은 버린다: 남겨 두면 그 시각까지 "방금 받음"으로 보여 조회가 멈춘다
+    fetchedAt: fetchedAt !== undefined && fetchedAt <= now ? fetchedAt : undefined,
+    limits,
+    nextAt: nextAt !== undefined ? Math.min(nextAt, now + CLAUDE_RETRY_AFTER_MAX_MS) : undefined,
+    backoffMs: n(r.backoffMs),
+    claim: typeof r.claim === 'string' ? r.claim : undefined,
+  }
+}
+
+// 설정 폴더(CLAUDE_CONFIG_DIR, 없으면 ~/.claude)마다 따로: 다른 계정으로 로그인한 설정 폴더와 값이 섞이지 않게.
+// 한계: 같은 설정 폴더에서 /login으로 계정을 바꾸면 다음 성공 조회(최대 백오프 시간) 전까지 이전 계정 값이 보일 수 있다.
+async function claudeCachePath($: EngineInterface): Promise<string | null> {
+  const dir = await $.env.get('CLAUDE_CONFIG_DIR')
+  if (dir) return `${dir}/usage-band-claude.json`
+  const home = (await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))
+  return home ? `${home}/.claude/usage-band-claude.json` : null
+}
+
+async function readCache($: EngineInterface, path: string, now: number): Promise<ClaudeCache> {
+  return sanitizeCache(await readJson($, path), now)
+}
+
+async function writeCache($: EngineInterface, path: string, c: ClaudeCache): Promise<boolean> {
+  return $.fs.write(path, JSON.stringify(c)).then(() => true, () => false)
+}
+
+// 파일 쓰기가 막혀도(권한·다른 플러그인의 fs 훅) 이 프로세스만큼은 쉬도록 메모리에도 하한을 둔다
+let memNextAt = 0
+let memBackoffMs = 0
+let inFlightSince = 0
+
 // 자격증명은 엔진이 쥐고 핸들만 준다(비밀값은 플러그인에 오지 않고, 퍼스트파티 호스트에만 쓰이며, 트래픽 차단 정책도 엔진이 지킨다).
-async function fetchClaude($: EngineInterface): Promise<ClaudeLimits | null> {
+async function refreshClaude($: EngineInterface): Promise<void> {
   const auth = await $.session.authorize()
   // 로그인 없음·3P 제공자·게이트웨이·API 키(이 엔드포인트는 구독 OAuth 전용): 엔진 값으로 표시.
   // 이전 계정의 조회 값이 남아 계속 보이지 않게 비운다.
   if (auth?.kind !== 'bearer') {
     await update($, claudeApi, () => null)
-    return null
+    return
   }
-  const res = await $.http.fetch(CLAUDE_USAGE_URL, {
-    method: 'GET',
-    headers: { 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' },
-    auth: auth.handle,
-  })
-  if (!res.ok) return null
-  const limits = parseClaudeUsage(JSON.parse(res.text))
-  return limits.length > 0 ? { fetchedAt: await $.clock.now(), limits } : null
-}
-
-const CLAUDE_BACKOFF_MS = 5 * 60_000 // 실패(401·429·네트워크) 뒤에는 5분 쉬고 다시 시도
-let claudeRetryAt = 0
-// fetch엔 타임아웃이 없어 진행 중 요청 위에 새 요청이 쌓이지 않게 막되, 끝내 안 오는 요청은 2분 뒤 포기한다
-const CLAUDE_INFLIGHT_MAX_MS = 2 * 60_000
-let claudeInFlightSince = 0
-
-async function refreshClaude($: EngineInterface): Promise<void> {
+  const path = await claudeCachePath($)
+  if (!path) return // 홈 경로를 모르면 공유 파일 없이 조회하지 않는다(세션마다 따로 물으면 429가 난다)
   const now = await $.clock.now()
-  if (now < claudeRetryAt || now - claudeInFlightSince < CLAUDE_INFLIGHT_MAX_MS) return
-  claudeInFlightSince = now
-  try {
-    const next = await fetchClaude($).catch(() => null)
-    if (next) await update($, claudeApi, () => next)
-    else claudeRetryAt = now + CLAUDE_BACKOFF_MS
-  } finally {
-    claudeInFlightSince = 0
+  const raw = await readJson($, path)
+  // 파일은 있는데 못 읽었다 = 다른 세션이 쓰는 중(쓰기가 원자적이지 않음). 이번 주기는 건너뛴다: 빈 값으로 보고 조회하면 백오프가 풀린다
+  if (raw === null && (await $.fs.exists(path).catch(() => false))) return
+  const cache = sanitizeCache(raw, now)
+  const showCache = async (c: ClaudeCache) => {
+    const at = c.fetchedAt
+    const limits = c.limits
+    if (at && limits && limits.length > 0) await update($, claudeApi, cur => (cur && cur.fetchedAt >= at ? cur : { fetchedAt: at, limits }))
   }
+  const fresh = cache.fetchedAt !== undefined && now - cache.fetchedAt < CLAUDE_POLL_MS
+  const waiting = now < Math.max(cache.nextAt ?? 0, memNextAt) || now - inFlightSince < CLAUDE_INFLIGHT_MAX_MS
+  if (fresh || waiting) {
+    await showCache(cache)
+    return
+  }
+  // 차례 잡기: 표시를 쓰고 다시 읽어 내 표시가 남아 있을 때만 묻는다(동시에 뜬 세션끼리 겹치는 창을 줄인다)
+  const claim = `${now}-${Math.random().toString(36).slice(2, 10)}`
+  memNextAt = now + CLAUDE_POLL_MS
+  if (await writeCache($, path, { ...cache, nextAt: now + CLAUDE_POLL_MS, claim })) {
+    if ((await readCache($, path, now)).claim !== claim) {
+      await showCache(cache)
+      return
+    }
+  }
+  inFlightSince = now
+  let ok = false
+  let retryAfter: number | null = null
+  try {
+    const res = await $.http.fetch(CLAUDE_USAGE_URL, {
+      method: 'GET',
+      headers: { 'anthropic-beta': 'oauth-2025-04-20', Accept: 'application/json' },
+      auth: auth.handle,
+    })
+    const limits = res.ok ? parseClaudeUsage(JSON.parse(res.text)) : []
+    if (limits.length > 0) {
+      ok = true
+      memBackoffMs = 0
+      await writeCache($, path, { fetchedAt: now, limits, nextAt: now + CLAUDE_POLL_MS, backoffMs: 0 })
+      await update($, claudeApi, () => ({ fetchedAt: now, limits }))
+    } else {
+      retryAfter = num(res.headers['retry-after'])
+    }
+  } catch {
+    // 네트워크 오류·형식 변경: 아래에서 실패로 처리
+  } finally {
+    inFlightSince = 0
+  }
+  if (ok) return
+  // 실패 기록 직전에 다시 읽는다: 그 사이 다른 세션이 성공했으면 그 값을 덮거나 쉬게 하지 않는다
+  const latest = await readCache($, path, now)
+  if (latest.fetchedAt !== undefined && latest.fetchedAt > (cache.fetchedAt ?? 0)) {
+    await showCache(latest)
+    return
+  }
+  const backoffMs = nextBackoff(Math.max(latest.backoffMs ?? 0, memBackoffMs), retryAfter)
+  memBackoffMs = backoffMs
+  memNextAt = now + backoffMs
+  await writeCache($, path, { ...latest, nextAt: now + backoffMs, backoffMs, claim: undefined })
+  await showCache(latest) // 실패해도 다른 세션이 받아 둔 마지막 값이 있으면 그것을 쓴다
 }
 
 // ctx는 서버 출처가 없다. 분모는 /context와 같은 자동 압축 창(rawMaxTokens)이고, 그 창은 'summary' 분석

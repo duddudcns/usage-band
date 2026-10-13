@@ -1,6 +1,36 @@
 import { expect, test } from 'claude-code/testing'
 
-import { buildUsage, parseClaudeUsage, pickLimits } from './register'
+import { buildUsage, nextBackoff, parseClaudeUsage, pickLimits, sanitizeCache } from './register'
+
+test('실패 대기는 2분부터 두 배씩, 최대 30분', async () => {
+  expect(nextBackoff(undefined, null)).toBe(120_000)
+  expect(nextBackoff(120_000, null)).toBe(240_000)
+  expect(nextBackoff(1_200_000, null)).toBe(1_800_000)
+  expect(nextBackoff(1_800_000, null)).toBe(1_800_000)
+})
+
+test('Retry-After가 더 길면 그만큼 기다리되 1시간을 넘기지 않는다', async () => {
+  expect(nextBackoff(undefined, 600)).toBe(600_000)
+  expect(nextBackoff(undefined, 30)).toBe(120_000)
+  expect(nextBackoff(undefined, 999_999)).toBe(3_600_000)
+})
+
+test('깨진 공유 파일은 빈 값으로, 이상한 항목은 버리고, 먼 미래 nextAt은 1시간으로 자른다', async () => {
+  expect(sanitizeCache(null, 0)).toEqual({})
+  expect(sanitizeCache('x', 0)).toEqual({})
+  const c = sanitizeCache({
+    fetchedAt: 10,
+    nextAt: 9e15,
+    limits: [{ kind: 'seven_day', percentUsed: 98, resetsAt: 'a' }, { kind: 'five_hour', percentUsed: 'NaN' }, null],
+  }, 1_000)
+  expect(c.nextAt).toBe(1_000 + 3_600_000)
+  expect(c.limits).toEqual([{ kind: 'seven_day', percentUsed: 98, resetsAt: 'a' }])
+  expect(c.fetchedAt).toBe(10)
+})
+
+test('공유 파일의 미래 fetchedAt은 버린다', async () => {
+  expect(sanitizeCache({ fetchedAt: 5_000 }, 1_000).fetchedAt).toBeUndefined()
+})
 
 test('ctx %는 토큰 ÷ 분모로 계산하고, 토큰이 없으면 엔진 %를 쓴다', async () => {
   expect(buildUsage(null, { tokens: 232_000, window: 1_000_000, limits: [] }, false, 5).ctxPercent).toBe(23)
