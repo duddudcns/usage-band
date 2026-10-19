@@ -54,7 +54,7 @@ function paceColor(rem: number, windowId: string, resetMs: number | null, now: n
   const shouldRemain = 100 - ((unit + 1) * 100) / pace.units
   return rem >= shouldRemain ? 'green' : 'yellow'
 }
-// 컨텍스트는 사용 % 기준 색
+// 컨텍스트는 사용 % 기준 색(압축 창이 있으면 그 창 대비 %)
 function ctxColor(used: number): string {
   if (used < 50) return 'green'
   if (used < 80) return 'yellow'
@@ -118,13 +118,16 @@ const CODEX_THEME: RowTheme = { bg: '#7B8CF52E', label: '#7B8CF5', logo: CODEX_P
 
 const HEX: Record<string, string> = { green: '#3fb950', yellow: '#d29922', red: '#f85149', gray: '#8b949e' }
 
-// 둥근 게이지 바 (트랙은 반투명 회색이라 라이트/다크 둘 다 보임), 폭 가변
-function bar(pct: number, color: string, width: number): string {
+// 둥근 게이지 바 (트랙은 반투명 회색이라 라이트/다크 둘 다 보임), 폭 가변.
+// markPct가 있으면 그 자리에 세로 눈금(자동 압축 지점)을 채움 위에 겹쳐 그린다.
+export function bar(pct: number, color: string, width: number, markPct?: number): string {
   const w = (Math.max(0, Math.min(100, pct)) / 100) * width
   const fill = HEX[color] ?? color
+  const markX = markPct !== undefined ? Math.max(1, Math.min(width - 1, (markPct / 100) * width)) : null
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="6" viewBox="0 0 ${width} 6">` +
     `<rect width="${width}" height="6" rx="3" fill="#8b949e" fill-opacity="0.25"/>` +
-    (w > 0 ? `<rect width="${Math.max(w, 6).toFixed(1)}" height="6" rx="3" fill="${fill}"/>` : '') + `</svg>`
+    (w > 0 ? `<rect width="${Math.max(w, 6).toFixed(1)}" height="6" rx="3" fill="${fill}"/>` : '') +
+    (markX !== null ? `<rect data-mark="${markPct}" x="${(markX - 1).toFixed(1)}" width="2" height="6" fill="#8b949e"/>` : '') + `</svg>`
 }
 
 // ---- Codex ----
@@ -440,23 +443,40 @@ async function refreshClaude($: EngineInterface): Promise<void> {
   await showCache(latest) // 실패해도 다른 세션이 받아 둔 마지막 값이 있으면 그것을 쓴다
 }
 
-// ctx는 서버 출처가 없다. 분모는 /context와 같은 자동 압축 창(rawMaxTokens)이고, 그 창은 'summary' 분석
-// (대화 전체 추정)으로만 알 수 있어 1분마다 잰다. 분자는 마지막 응답의 입력 토큰(엔진 값, 실측상 분석 추정과 0.1% 이내).
+// ctx는 서버 출처가 없다. 분모는 모델 창(context.window)이다. autoCompactWindow 같은 설정으로 자동 압축 창
+// (rawMaxTokens)이 그보다 작으면 그 지점을 막대 눈금으로 남기는데, 그 창은 'summary' 분석(대화 전체 추정)으로만
+// 알 수 있어 1분마다 잰다. 분자는 마지막 응답의 입력 토큰(엔진 값, 실측상 분석 추정과 0.1% 이내).
 // 엔진의 session.measure는 턴마다 한 번 정도만 오지만 토큰 값은 응답 단계마다 바뀐다(실측) → 짧게 읽는다.
 // 분석 없는 $.session.usage()는 계산 없는 호출이고, 값이 같으면 쓰지 않아 다시 그리지도 않는다.
 const CTX_POLL_MS = 5_000
-let ctxWindowBasis: number | null = null // 모듈이 다시 올라오면 비지만 다음 1분 분석에서 다시 채워진다
+// 마지막 분석이 본 압축 창: 숫자 = 모델 창보다 작음, null = 제한 없음, undefined = 모듈이 다시 올라온 뒤 아직 안 잼
+let ctxLimitBasis: number | null | undefined
+
+// 분석이 있으면 압축 창을 새로 정하고, 없으면 지난 값(모듈이 막 올라왔으면 저장된 값)을 쓴다.
+// 쓸 때마다 지금 모델 창과 다시 견준다: 분석 사이에 모델이 바뀌어 창이 작아질 수 있어서.
+export function nextCtxLimit(
+  basis: number | null | undefined,
+  stored: number | undefined,
+  context: { window: number; breakdown?: { isAutoCompactEnabled: boolean; rawMaxTokens: number } },
+): { basis: number | null | undefined; limit?: number } {
+  const b = context.breakdown
+  const next = b ? (b.isAutoCompactEnabled && b.rawMaxTokens > 0 && b.rawMaxTokens < context.window ? b.rawMaxTokens : null) : basis
+  const known = next === undefined ? stored : next ?? undefined
+  return known !== undefined && known < context.window ? { basis: next, limit: known } : { basis: next }
+}
 
 type EngineUsage = Awaited<ReturnType<EngineInterface['session']['usage']>>
 
 function sameUsage(a: Usage, b: Usage): boolean {
   return a.ctxPercent === b.ctxPercent && a.ctxTokens === b.ctxTokens && a.ctxWindow === b.ctxWindow
+    && a.ctxLimit === b.ctxLimit
     && JSON.stringify(a.limits) === JSON.stringify(b.limits)
 }
 
 type EngineReading = {
   tokens?: number
-  window: number // 분모(자동 압축 창 또는 모델 창)
+  window: number // 분모(모델 창)
+  limit?: number // 모델 창보다 작은 자동 압축 창(제한이 없으면 없음)
   percent?: number // 엔진이 계산한 %(tokens가 없을 때만 씀)
   limits: Usage['limits'] // 비어 있으면 이전 값을 유지
 }
@@ -468,23 +488,25 @@ export function buildUsage(prev: Usage | null | undefined, r: EngineReading, fro
     ctxPercent: r.tokens !== undefined && r.window > 0 ? Math.round((r.tokens / r.window) * 100) : r.percent,
     ctxTokens: r.tokens,
     ctxWindow: r.window,
+    ...(r.limit !== undefined && { ctxLimit: r.limit }),
     limits: hasLimits ? r.limits : prev?.limits ?? [],
     limitsAt: hasLimits && fromResponse ? Math.max(prev?.limitsAt ?? 0, now) : prev?.limitsAt ?? 0,
   }
 }
 
 async function applyEngineUsage($: EngineInterface, u: Pick<EngineUsage, 'context' | 'rateLimits'>, fromResponse: boolean): Promise<void> {
-  const breakdownWindow = u.context.breakdown?.rawMaxTokens
-  if (breakdownWindow && breakdownWindow > 0) ctxWindowBasis = breakdownWindow
+  const cur = await read($, usage)
+  const ctx = nextCtxLimit(ctxLimitBasis, cur?.ctxLimit, u.context)
+  ctxLimitBasis = ctx.basis
   const reading: EngineReading = {
     tokens: u.context.tokens,
-    window: ctxWindowBasis ?? u.context.window,
+    window: u.context.window,
+    ...(ctx.limit !== undefined && { limit: ctx.limit }),
     percent: u.context.percent,
     limits: u.rateLimits.map(l => ({ kind: l.kind, percentUsed: l.percentUsed, resetsAt: l.resetsAt })),
   }
   const now = await $.clock.now()
   // 같은 값을 다시 쓰면 읽는 쪽이 다시 그려지므로 아예 쓰지 않는다
-  const cur = await read($, usage)
   const probe = buildUsage(cur, reading, fromResponse, now)
   if (cur && sameUsage(cur, probe) && cur.limitsAt === probe.limitsAt) return
   // 계산은 update 안에서 최신 값(prev) 기준으로 다시 한다: 그 사이 다른 쓰기가 끼어도 덮어쓰지 않도록
@@ -507,6 +529,14 @@ export function pickLimits(engine: Usage | null, api: ClaudeLimits | null, now: 
 // 1분 주기 작업. 하나가 실패해도 나머지는 돈다.
 async function refreshAll($: EngineInterface): Promise<void> {
   await Promise.allSettled([measureCtx($, true), refreshClaude($), refreshCodex($)])
+}
+
+// 막대에 쓸 값: used = 모델 창 대비 %, colorPct = 색 기준(압축 창이 있으면 그 창 대비), markPct = 압축 지점 눈금
+export function ctxView(u: Usage): { used: number; colorPct: number; markPct?: number } {
+  const used = u.ctxPercent ?? 0
+  if (u.ctxLimit === undefined || u.ctxWindow <= 0) return { used, colorPct: used, markPct: undefined }
+  const colorPct = u.ctxTokens !== undefined ? Math.round((u.ctxTokens / u.ctxLimit) * 100) : Math.round((used * u.ctxWindow) / u.ctxLimit)
+  return { used, colorPct, markPct: Math.round((u.ctxLimit / u.ctxWindow) * 100) }
 }
 
 // ---- 표시용 슬롯 ----
@@ -561,7 +591,8 @@ export const register: Register = on => {
     const ui = $.ui.resolve(e)
     const { Box, Text } = ui
     const hasCtx = u?.ctxPercent !== undefined
-    const used = u?.ctxPercent ?? 0
+    const view = u ? ctxView(u) : { used: 0, colorPct: 0, markPct: undefined }
+    const used = view.used
     const win = u ? fmtTokens(u.ctxWindow) : '–'
     const tokens = u?.ctxTokens !== undefined ? `${fmtTokens(u.ctxTokens)} / ${win}` : `– / ${win}`
 
@@ -584,11 +615,11 @@ export const register: Register = on => {
       const barW = BAR_W[tier]
 
       // 항목 안 요소는 기본 간격으로 붙여 두고(요소별 고정 폭 없음), 정렬은 항목 바깥 폭(가장 긴 경우 기준)으로 맞춘다
-      const chip = (key: string, label: string, pct: number, color: string, value: string, pending: boolean, tail: unknown, tailCells: number) => (
+      const chip = (key: string, label: string, pct: number, color: string, value: string, pending: boolean, tail: unknown, tailCells: number, markPct?: number) => (
         <Box key={key} flexDirection="row" alignItems="center" gap={1} flexShrink={0}
           width={COL.label + BAR_CELLS[tier] + COL.value + tailCells + 3}>
           <Text bold={!pending} dimColor={pending}>{label}</Text>
-          {barW > 0 ? <Svg source={bar(pending ? 0 : pct, color, barW)} alt={`${label} ${value}`} width={barW} height={6} /> : null}
+          {barW > 0 ? <Svg source={bar(pending ? 0 : pct, color, barW, markPct)} alt={`${label} ${value}`} width={barW} height={6} /> : null}
           <Text color={pending ? undefined : color} bold={!pending} dimColor={pending}>{value}</Text>
           {tail}
         </Box>
@@ -613,8 +644,8 @@ export const register: Register = on => {
       )
 
       const claudeItems = claude.map(slotChip)
-      claudeItems.push(chip('ctx', 'ctx', used, hasCtx ? ctxColor(used) : 'gray', hasCtx ? `${used}%` : '–', !hasCtx,
-        tier >= 2 ? <Text dimColor>{tokens}</Text> : null, tier >= 2 ? COL.tokens : 0))
+      claudeItems.push(chip('ctx', 'ctx', used, hasCtx ? ctxColor(view.colorPct) : 'gray', hasCtx ? `${used}%` : '–', !hasCtx,
+        tier >= 2 ? <Text dimColor>{tokens}</Text> : null, tier >= 2 ? COL.tokens : 0, hasCtx ? view.markPct : undefined))
 
       return (
         <Box flexDirection="column">
@@ -644,8 +675,8 @@ export const register: Register = on => {
         {textRow('claude', 'Claude', CLAUDE_THEME, claude, (
           <Box flexDirection="row">
             <Text dimColor> | ctx </Text>
-            {hasCtx ? <Text color={ctxColor(used)}>{used}%</Text> : <Text dimColor>–</Text>}
-            <Text dimColor> ({tokens})</Text>
+            {hasCtx ? <Text color={ctxColor(view.colorPct)}>{used}%</Text> : <Text dimColor>–</Text>}
+            <Text dimColor> ({tokens}{view.markPct !== undefined && u?.ctxLimit !== undefined ? ` · 압축 ${fmtTokens(u.ctxLimit)}` : ''})</Text>
           </Box>
         ))}
         {textRow('codex', 'Codex', CODEX_THEME, cxSlots, null)}

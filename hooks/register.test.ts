@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { buildUsage, nextBackoff, parseClaudeUsage, pickLimits, sanitizeCache } from './register'
+import { bar, buildUsage, ctxView, nextBackoff, nextCtxLimit, parseClaudeUsage, pickLimits, sanitizeCache } from './register'
 
 test('실패 대기는 2분부터 두 배씩, 최대 30분', async () => {
   expect(nextBackoff(undefined, null)).toBe(120_000)
@@ -99,4 +99,51 @@ test('창이 null이거나 사용률이 숫자가 아니면 건너뛴다', async
 
 test('사용률은 0~100으로 자르고 리셋 시각이 없으면 생략한다', async () => {
   expect(parseClaudeUsage({ seven_day: { utilization: 120 } })).toEqual([{ kind: 'seven_day', percentUsed: 100 }])
+})
+
+test('압축 창을 모델 창보다 작게 잡으면 그 값을 눈금으로 남기고, 같으면 남기지 않는다', async () => {
+  expect(buildUsage(null, { tokens: 160_000, window: 1_000_000, limit: 400_000, limits: [] }, false, 5))
+    .toMatchObject({ ctxPercent: 16, ctxWindow: 1_000_000, ctxLimit: 400_000 })
+  expect(buildUsage(null, { tokens: 160_000, window: 1_000_000, limits: [] }, false, 5).ctxLimit).toBeUndefined()
+})
+
+test('눈금 위치는 압축 창 ÷ 모델 창, 색은 압축 창에 얼마나 가까운지로 정한다', async () => {
+  expect(ctxView({ ctxPercent: 32, ctxTokens: 320_000, ctxWindow: 1_000_000, ctxLimit: 400_000, limits: [] }))
+    .toEqual({ used: 32, colorPct: 80, markPct: 40 })
+  expect(ctxView({ ctxPercent: 32, ctxTokens: 320_000, ctxWindow: 1_000_000, limits: [] }))
+    .toEqual({ used: 32, colorPct: 32, markPct: undefined })
+})
+
+test('막대는 눈금이 있을 때만 눈금 선을 그린다', async () => {
+  expect(bar(16, 'green', 100, 40)).toContain('data-mark="40"')
+  expect(bar(16, 'green', 100)).not.toContain('data-mark')
+})
+
+const bd = (rawMaxTokens: number, isAutoCompactEnabled = true) => ({ rawMaxTokens, isAutoCompactEnabled })
+
+test('분석이 모델 창보다 작은 압축 창을 보면 눈금을 남기고, 같거나 자동 압축이 꺼져 있으면 지운다', async () => {
+  expect(nextCtxLimit(undefined, undefined, { window: 1_000_000, breakdown: bd(400_000) })).toEqual({ basis: 400_000, limit: 400_000 })
+  expect(nextCtxLimit(400_000, 400_000, { window: 1_000_000, breakdown: bd(1_000_000) })).toEqual({ basis: null })
+  expect(nextCtxLimit(400_000, 400_000, { window: 1_000_000, breakdown: bd(400_000, false) })).toEqual({ basis: null })
+})
+
+test('분석 없는 읽기는 지난 압축 창을 쓰되, 모델 창이 그보다 작아졌으면 눈금을 지운다', async () => {
+  expect(nextCtxLimit(400_000, undefined, { window: 1_000_000 })).toEqual({ basis: 400_000, limit: 400_000 })
+  expect(nextCtxLimit(null, 400_000, { window: 1_000_000 })).toEqual({ basis: null })
+  expect(nextCtxLimit(400_000, 400_000, { window: 200_000 })).toEqual({ basis: 400_000 })
+})
+
+test('모듈이 다시 올라와 아직 안 쟀으면 저장된 눈금을 이어 쓴다', async () => {
+  expect(nextCtxLimit(undefined, 400_000, { window: 1_000_000 })).toEqual({ basis: undefined, limit: 400_000 })
+  expect(nextCtxLimit(undefined, undefined, { window: 1_000_000 })).toEqual({ basis: undefined })
+})
+
+test('토큰이 없으면 엔진 %로 색을 정하고, 모델 창이 0이면 눈금을 그리지 않는다', async () => {
+  expect(ctxView({ ctxPercent: 32, ctxWindow: 1_000_000, ctxLimit: 400_000, limits: [] }).colorPct).toBe(80)
+  expect(ctxView({ ctxPercent: 5, ctxWindow: 0, ctxLimit: 400_000, limits: [] }).markPct).toBeUndefined()
+})
+
+test('눈금은 막대 끝을 넘지 않는다', async () => {
+  expect(bar(0, 'green', 100, 150)).toContain('x="98.0"')
+  expect(bar(0, 'green', 100, 0)).toContain('x="0.0"')
 })
