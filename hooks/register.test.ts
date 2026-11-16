@@ -1,6 +1,8 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
+import type { TestBody } from 'claude-code/testing'
 
-import { bar, buildUsage, ctxView, nextBackoff, nextCtxLimit, parseClaudeUsage, pickLimits, sanitizeCache } from './register'
+import { bar, buildUsage, cellWidth, ctxView, fitLevel, nextBackoff, nextCtxLimit, parseClaudeUsage, pickLimits, rowText, sanitizeCache } from './register'
+import type { RowSpec } from './register'
 
 test('실패 대기는 2분부터 두 배씩, 최대 30분', async () => {
   expect(nextBackoff(undefined, null)).toBe(120_000)
@@ -146,4 +148,87 @@ test('토큰이 없으면 엔진 %로 색을 정하고, 모델 창이 0이면 �
 test('눈금은 막대 끝을 넘지 않는다', async () => {
   expect(bar(0, 'green', 100, 150)).toContain('x="98.0"')
   expect(bar(0, 'green', 100, 0)).toContain('x="0.0"')
+})
+
+const slot = (key: string, label: string, rem: number, left: string, atShort: string) =>
+  ({ key, label, pending: false, rem, color: 'green', reset: { left, at: '', atShort } })
+const claudeRow: RowSpec = {
+  name: 'Claude',
+  slots: [slot('five_hour', '5h', 75, '03:41', '화 06:24'), slot('seven_day', '7d', 31, '2d 13:59', '목 16:42')],
+  ctx: { value: '22%', detail: '223K / 1.0M · 압축 400K' },
+}
+const codexRow: RowSpec = {
+  name: 'Codex',
+  slots: [slot('cx0-5h', '5h', 75, '03:41', '화 06:24'), slot('cx0-7d', '7d', 92, '2d 13:59', '목 16:42')],
+}
+const fit = (spec: RowSpec, columns?: number) => rowText(spec, fitLevel(spec, columns))
+
+test('표시 폭은 한글을 2칸, 나머지를 1칸으로 센다', async () => {
+  expect(cellWidth('압축 400K')).toBe(9)
+  expect(cellWidth('5h:75% (03:41 · 화 06:24)')).toBe(25)
+})
+
+test('폭을 모르거나 넓으면 지금과 같은 글자를 그대로 그린다', async () => {
+  const full = 'Claude 5h:75% (03:41 · 화 06:24) | 7d:31% (2d 13:59 · 목 16:42) | ctx 22% (223K / 1.0M · 압축 400K)'
+  expect(fit(claudeRow)).toBe(full)
+  expect(fit(claudeRow, 120)).toBe(full)
+  expect(fit(codexRow, 120)).toBe('Codex  5h:75% (03:41 · 화 06:24) | 7d:92% (2d 13:59 · 목 16:42)')
+})
+
+test('90칸에선 리셋 시각을 빼고 남은 시간만 남긴다', async () => {
+  expect(fit(claudeRow, 90)).toBe('Claude 5h:75% (03:41) | 7d:31% (2d 13:59) | ctx 22% (223K / 1.0M · 압축 400K)')
+  expect(fit(codexRow, 90)).toBe('Codex  5h:75% (03:41 · 화 06:24) | 7d:92% (2d 13:59 · 목 16:42)')
+})
+
+test('70칸에선 ctx 괄호도 뺀다', async () => {
+  expect(fit(claudeRow, 70)).toBe('Claude 5h:75% (03:41) | 7d:31% (2d 13:59) | ctx 22%')
+  expect(fit(codexRow, 70)).toBe('Codex  5h:75% (03:41 · 화 06:24) | 7d:92% (2d 13:59 · 목 16:42)')
+})
+
+test('50칸에선 시간 괄호까지 빼고 %만 남긴다', async () => {
+  expect(fit(claudeRow, 50)).toBe('Claude 5h:75% | 7d:31% | ctx 22%')
+  expect(fit(codexRow, 50)).toBe('Codex  5h:75% (03:41) | 7d:92% (2d 13:59)')
+})
+
+test('어느 폭에서든 줄은 한 줄 폭을 넘지 않는다(가장 좁은 단계 제외)', async () => {
+  for (const w of [120, 100, 90, 80, 70, 60, 50, 40]) {
+    for (const spec of [claudeRow, codexRow]) expect(cellWidth(fit(spec, w))).toBeLessThan(w)
+  }
+})
+
+test('대기 중 칸은 –로 그리고 리셋 괄호가 없다', async () => {
+  const pending: RowSpec = { name: 'Codex', slots: [{ key: 'a', label: '5h', pending: true, rem: 0, color: 'gray', reset: null }] }
+  expect(fit(pending, 50)).toBe('Codex  5h:–')
+})
+
+// 실제 그리기: 터미널 밴드를 폭별로 그려 줄마다 이어 붙인 글자를 본다
+const bandAt = async ($: Parameters<TestBody>[0], columns: number) => {
+  const ui = await $.ui.mount({ plugin: 'usage-band', surface: 'terminal', component: 'AbovePrompt',
+    props: { hasSurvey: false, isCollapsed: false } as never, viewport: { columns, rows: 40 } })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text ?? '')
+  await ui.unmount()
+  const split = texts.findIndex(t => t.startsWith('Codex'))
+  return [texts.slice(0, split).join(''), texts.slice(split).join('')]
+}
+
+test('터미널 밴드는 폭이 좁아질수록 리셋 시각 → ctx 괄호 → 시간 괄호 순으로 줄이고 한 줄을 지킨다', async ($, on) => {
+  const now = 1_790_000_000_000
+  mock.clock(on, { now })
+  const at = (h: number) => new Date(now + h * 3_600_000).toISOString()
+  const seeded: Record<string, unknown> = {
+    usage: { ctxPercent: 22, ctxTokens: 223_000, ctxWindow: 1_000_000, ctxLimit: 400_000, limits: [], limitsAt: 0 },
+    claude: { fetchedAt: now, limits: [
+      { kind: 'five_hour', percentUsed: 25, resetsAt: at(3) }, { kind: 'seven_day', percentUsed: 69, resetsAt: at(61) }] },
+    codex: { fetchedAt: now, accounts: [{ plan: 'pro',
+      fiveHour: { usedPercent: 25, resetsAt: Math.floor(now / 1000) + 3 * 3600 },
+      weekly: { usedPercent: 8, resetsAt: Math.floor(now / 1000) + 61 * 3600 } }] },
+  }
+  on('state.get', (_, e) => ({ value: { value: seeded[(e as { key: string }).key] ?? null } }) as never)
+
+  const [c120, x120] = await bandAt($, 120)
+  expect(c120).toMatch(/^Claude 5h:75% \(03:00 · . \d\d:\d\d\) \| 7d:31% \(2d 13:00 · . \d\d:\d\d\) \| ctx 22% \(223K \/ 1\.0M · 압축 400K\)$/)
+  expect(x120).toMatch(/^Codex  5h:75% \(03:00 · . \d\d:\d\d\) \| 7d:92% \(2d 13:00 · . \d\d:\d\d\)$/)
+  expect((await bandAt($, 90))[0]).toBe('Claude 5h:75% (03:00) | 7d:31% (2d 13:00) | ctx 22% (223K / 1.0M · 압축 400K)')
+  expect((await bandAt($, 70))[0]).toBe('Claude 5h:75% (03:00) | 7d:31% (2d 13:00) | ctx 22%')
+  expect(await bandAt($, 50)).toEqual(['Claude 5h:75% | 7d:31% | ctx 22%', 'Codex  5h:75% (03:00) | 7d:92% (2d 13:00)'])
 })

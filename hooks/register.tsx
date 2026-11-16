@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { ClaudeLimits, CodexAccount, CodexUsage, CodexWindow, Usage } from '../types'
 import { CLAUDE_PNG, CODEX_PNG } from './logos'
@@ -541,7 +541,7 @@ export function ctxView(u: Usage): { used: number; colorPct: number; markPct?: n
 
 // ---- 표시용 슬롯 ----
 
-type Slot = { key: string; label: string; pending: boolean; rem: number; color: string; reset: Reset | null }
+export type Slot = { key: string; label: string; pending: boolean; rem: number; color: string; reset: Reset | null }
 
 function pendingSlot(key: string, label: string): Slot {
   return { key, label, pending: true, rem: 0, color: 'gray', reset: null }
@@ -561,6 +561,91 @@ function codexSlots(c: CodexUsage | null, now: number): Slot[] {
     }
     return [mk(a.fiveHour, '5h', '5h'), mk(a.weekly, '7d', '7d')]
   })
+}
+
+// ---- 터미널 글자 줄: 좁은 창에서도 서비스마다 한 줄 ----
+
+// 줄임 단계: 0 그대로 → 1 리셋 시각 뺌(남은 시간만) → 2 ctx 괄호 뺌 → 3 시간 괄호 뺌(%만)
+type Level = 0 | 1 | 2 | 3
+const LEVELS: Level[] = [0, 1, 2, 3]
+// 밴드 테두리·커서 칸 몫으로 남겨 두는 칸(마지막 칸까지 채우면 터미널이 줄을 넘길 수 있다)
+const ROW_RESERVE = 2
+
+export type RowSpec = { name: string; slots: Slot[]; ctx?: { value: string; detail: string } }
+
+// 터미널 칸 수: 한글·CJK·전각은 2칸, 결합 문자는 0칸, 나머지 1칸
+export function cellWidth(s: string): number {
+  let w = 0
+  for (const ch of s) {
+    const c = ch.codePointAt(0) ?? 0
+    if ((c >= 0x300 && c <= 0x36f) || c === 0x200b || (c >= 0xfe00 && c <= 0xfe0f)) continue
+    const wide = (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3)
+      || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60)
+      || (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1faff) || (c >= 0x20000 && c <= 0x3fffd)
+    w += wide ? 2 : 1
+  }
+  return w
+}
+
+function resetText(r: Reset | null, level: Level): string {
+  if (!r || level >= 3) return ''
+  return level === 0 ? ` (${r.left} · ${r.atShort})` : ` (${r.left})`
+}
+
+function ctxDetail(detail: string, level: Level): string {
+  return level >= 2 ? '' : ` (${detail})`
+}
+
+const slotHead = (s: Slot, i: number) => `${i > 0 ? ' | ' : ''}${s.label}:`
+const slotValue = (s: Slot) => (s.pending ? '–' : `${s.rem}%`)
+
+// 그리는 글자와 같은 순서로 이어 붙인 한 줄(폭 재기·테스트용)
+export function rowText(spec: RowSpec, level: Level): string {
+  const slots = spec.slots.map((s, i) => slotHead(s, i) + slotValue(s) + resetText(s.reset, level)).join('')
+  const ctx = spec.ctx ? ` | ctx ${spec.ctx.value}${ctxDetail(spec.ctx.detail, level)}` : ''
+  return spec.name.padEnd(7) + slots + ctx
+}
+
+// 한 줄에 들어가는 가장 덜 줄인 단계. 폭을 모르면 그대로, 가장 좁은 단계로도 넘치면 그 단계
+export function fitLevel(spec: RowSpec, columns: number | undefined): Level {
+  if (columns === undefined) return 0
+  return LEVELS.find(l => cellWidth(rowText(spec, l)) <= columns - ROW_RESERVE) ?? 3
+}
+
+type BandUi = Pick<ElementTable, 'Box' | 'Text'>
+type TextBandData = { claude: Slot[]; codex: Slot[]; ctxValue: string; ctxColor?: string; ctxDetail: string }
+
+// 터미널 두 줄. 줄마다 폭에 맞는 줄임 단계를 따로 고른다(넓으면 예전과 같은 글자)
+function textBand({ Box, Text }: BandUi, d: TextBandData, columns: number | undefined) {
+  const claudeLevel = fitLevel({ name: 'Claude', slots: d.claude, ctx: { value: d.ctxValue, detail: d.ctxDetail } }, columns)
+  const codexLevel = fitLevel({ name: 'Codex', slots: d.codex }, columns)
+
+  const textRow = (key: string, name: string, theme: RowTheme, slots: Slot[], level: Level, extra: RenderChildren) => (
+    <Box key={key} flexDirection="row">
+      <Text color={theme.label} bold>{name.padEnd(7)}</Text>
+      {slots.map((s, i) => (
+        <Box key={s.key} flexDirection="row">
+          <Text dimColor>{slotHead(s, i)}</Text>
+          {s.pending ? <Text dimColor>–</Text> : <Text color={s.color}>{s.rem}%</Text>}
+          <Text dimColor>{resetText(s.reset, level)}</Text>
+        </Box>
+      ))}
+      {extra}
+    </Box>
+  )
+
+  return (
+    <Box flexDirection="column">
+      {textRow('claude', 'Claude', CLAUDE_THEME, d.claude, claudeLevel, (
+        <Box flexDirection="row">
+          <Text dimColor> | ctx </Text>
+          {d.ctxColor ? <Text color={d.ctxColor}>{d.ctxValue}</Text> : <Text dimColor>–</Text>}
+          <Text dimColor>{ctxDetail(d.ctxDetail, claudeLevel)}</Text>
+        </Box>
+      ))}
+      {textRow('codex', 'Codex', CODEX_THEME, d.codex, codexLevel, null)}
+    </Box>
+  )
 }
 
 export const register: Register = on => {
@@ -656,31 +741,7 @@ export const register: Register = on => {
       )
     }
 
-    const textRow = (key: string, name: string, theme: RowTheme, slots: Slot[], extra: unknown) => (
-      <Box key={key} flexDirection="row">
-        <Text color={theme.label} bold>{name.padEnd(7)}</Text>
-        {slots.map((s, i) => (
-          <Box key={s.key} flexDirection="row">
-            <Text dimColor>{i > 0 ? ' | ' : ''}{s.label}:</Text>
-            {s.pending ? <Text dimColor>–</Text> : <Text color={s.color}>{s.rem}%</Text>}
-            <Text dimColor>{s.reset ? ` (${s.reset.left} · ${s.reset.atShort})` : ''}</Text>
-          </Box>
-        ))}
-        {extra}
-      </Box>
-    )
-
-    return (
-      <Box flexDirection="column">
-        {textRow('claude', 'Claude', CLAUDE_THEME, claude, (
-          <Box flexDirection="row">
-            <Text dimColor> | ctx </Text>
-            {hasCtx ? <Text color={ctxColor(view.colorPct)}>{used}%</Text> : <Text dimColor>–</Text>}
-            <Text dimColor> ({tokens}{view.markPct !== undefined && u?.ctxLimit !== undefined ? ` · 압축 ${fmtTokens(u.ctxLimit)}` : ''})</Text>
-          </Box>
-        ))}
-        {textRow('codex', 'Codex', CODEX_THEME, cxSlots, null)}
-      </Box>
-    )
+    return textBand(ui, { claude, codex: cxSlots, ctxValue: hasCtx ? `${used}%` : '–', ctxColor: hasCtx ? ctxColor(view.colorPct) : undefined,
+      ctxDetail: `${tokens}${view.markPct !== undefined && u?.ctxLimit !== undefined ? ` · 압축 ${fmtTokens(u.ctxLimit)}` : ''}` }, e.viewport?.columns)
   })
 }
