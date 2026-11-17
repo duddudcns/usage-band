@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { bar, buildUsage, cellWidth, ctxView, fitLevel, nextBackoff, nextCtxLimit, parseClaudeUsage, pickLimits, rowText, sanitizeCache } from './register'
+import { ROW_RESERVE, TOGGLE_CELLS, bar, buildUsage, cellWidth, ctxView, fitLevel, nextBackoff, nextCtxLimit, parseClaudeUsage, pickLimits, rowText, sanitizeCache } from './register'
 import type { RowSpec } from './register'
 
 test('실패 대기는 2분부터 두 배씩, 최대 30분', async () => {
@@ -161,7 +161,7 @@ const codexRow: RowSpec = {
   name: 'Codex',
   slots: [slot('cx0-5h', '5h', 75, '03:41', '화 06:24'), slot('cx0-7d', '7d', 92, '2d 13:59', '목 16:42')],
 }
-const fit = (spec: RowSpec, columns?: number) => rowText(spec, fitLevel(spec, columns))
+const fit = (spec: RowSpec, columns?: number) => rowText(spec, fitLevel(spec, columns, spec.name === 'Claude'))
 
 test('표시 폭은 한글을 2칸, 나머지를 1칸으로 센다', async () => {
   expect(cellWidth('압축 400K')).toBe(9)
@@ -194,6 +194,22 @@ test('어느 폭에서든 줄은 한 줄 폭을 넘지 않는다(가장 좁은 �
   for (const w of [120, 100, 90, 80, 70, 60, 50, 40]) {
     for (const spec of [claudeRow, codexRow]) expect(cellWidth(fit(spec, w))).toBeLessThan(w)
   }
+})
+
+test('첫 줄(Claude)은 접기 단추 ` [-]`와 여백 몫을 남기고 그 안에 들어간다', async () => {
+  expect(ROW_RESERVE + TOGGLE_CELLS).toBeGreaterThanOrEqual(8)
+  // 2026-11-17 화면: 80칸 창에서 78칸짜리 줄이 단추 때문에 줄바꿈됐다
+  const shot: RowSpec = {
+    name: 'Claude',
+    slots: [{ key: 'five_hour', label: '5h', pending: true, rem: 0, color: 'gray', reset: null },
+      slot('seven_day', '7d', 37, '4d 20:04', '일 12:59')],
+    ctx: { value: '21%', detail: '205K / 1.0M · 압축 400K' },
+  }
+  for (const w of [80, 79, 78, 76, 74]) {
+    const line = fit(shot, w)
+    expect(cellWidth(line) + ' [-]'.length + 2).toBeLessThanOrEqual(w)
+  }
+  expect(fit(shot, 80)).toBe('Claude 5h:– | 7d:37% (4d 20:04) | ctx 21% (205K / 1.0M · 압축 400K)')
 })
 
 test('대기 중 칸은 –로 그리고 리셋 괄호가 없다', async () => {

@@ -568,8 +568,11 @@ function codexSlots(c: CodexUsage | null, now: number): Slot[] {
 // 줄임 단계: 0 그대로 → 1 리셋 시각 뺌(남은 시간만) → 2 ctx 괄호 뺌 → 3 시간 괄호 뺌(%만)
 type Level = 0 | 1 | 2 | 3
 const LEVELS: Level[] = [0, 1, 2, 3]
-// 밴드 테두리·커서 칸 몫으로 남겨 두는 칸(마지막 칸까지 채우면 터미널이 줄을 넘길 수 있다)
-const ROW_RESERVE = 2
+// 줄마다 글자가 쓸 수 없는 칸: 밴드 좌우 여백(2칸)과 마지막 칸 줄넘김 방지(2칸)
+export const ROW_RESERVE = 4
+// Claude Code가 밴드 첫 줄 오른쪽 끝에만 그리는 접기 단추 ` [-]`. 0.4.3은 이 몫을 빼지 않아 80칸 안팎 창에서
+// 첫 줄(Claude)의 리셋 시각·ctx 괄호가 다음 줄로 밀렸다(2026-11-17 화면).
+export const TOGGLE_CELLS = 4
 
 export type RowSpec = { name: string; slots: Slot[]; ctx?: { value: string; detail: string } }
 
@@ -607,9 +610,10 @@ export function rowText(spec: RowSpec, level: Level): string {
 }
 
 // 한 줄에 들어가는 가장 덜 줄인 단계. 폭을 모르면 그대로, 가장 좁은 단계로도 넘치면 그 단계
-export function fitLevel(spec: RowSpec, columns: number | undefined): Level {
+export function fitLevel(spec: RowSpec, columns: number | undefined, firstRow = false): Level {
   if (columns === undefined) return 0
-  return LEVELS.find(l => cellWidth(rowText(spec, l)) <= columns - ROW_RESERVE) ?? 3
+  const room = columns - ROW_RESERVE - (firstRow ? TOGGLE_CELLS : 0)
+  return LEVELS.find(l => cellWidth(rowText(spec, l)) <= room) ?? 3
 }
 
 type BandUi = Pick<ElementTable, 'Box' | 'Text'>
@@ -617,7 +621,7 @@ type TextBandData = { claude: Slot[]; codex: Slot[]; ctxValue: string; ctxColor?
 
 // 터미널 두 줄. 줄마다 폭에 맞는 줄임 단계를 따로 고른다(넓으면 예전과 같은 글자)
 function textBand({ Box, Text }: BandUi, d: TextBandData, columns: number | undefined) {
-  const claudeLevel = fitLevel({ name: 'Claude', slots: d.claude, ctx: { value: d.ctxValue, detail: d.ctxDetail } }, columns)
+  const claudeLevel = fitLevel({ name: 'Claude', slots: d.claude, ctx: { value: d.ctxValue, detail: d.ctxDetail } }, columns, true)
   const codexLevel = fitLevel({ name: 'Codex', slots: d.codex }, columns)
 
   const textRow = (key: string, name: string, theme: RowTheme, slots: Slot[], level: Level, extra: RenderChildren) => (
