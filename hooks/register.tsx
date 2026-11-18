@@ -371,7 +371,17 @@ let memBackoffMs = 0
 let inFlightSince = 0
 
 // 자격증명은 엔진이 쥐고 핸들만 준다(비밀값은 플러그인에 오지 않고, 퍼스트파티 호스트에만 쓰이며, 트래픽 차단 정책도 엔진이 지킨다).
-async function refreshClaude($: EngineInterface): Promise<void> {
+// 세션이 열릴 때(force)는 주기·백오프를 기다리지 않고 한 번 묻는다: 계정을 바꾼 뒤 이전 계정 값이 몇 분씩 남던 문제(2026-11-18).
+// 그래도 방금(10초 안) 받은 값이 있거나 조회가 진행 중이면 묻지 않는다: 같이 뜬 세션들이 한꺼번에 물으면 429가 난다.
+const CLAUDE_FORCE_FRESH_MS = 10_000
+export function skipFetch(cache: ClaudeCache, now: number, memNext: number, inFlight: number, force: boolean): boolean {
+  if (now - inFlight < CLAUDE_INFLIGHT_MAX_MS) return true
+  const age = cache.fetchedAt === undefined ? Infinity : now - cache.fetchedAt
+  if (force) return age < CLAUDE_FORCE_FRESH_MS
+  return age < CLAUDE_POLL_MS || now < Math.max(cache.nextAt ?? 0, memNext)
+}
+
+async function refreshClaude($: EngineInterface, force = false): Promise<void> {
   const auth = await $.session.authorize()
   // 로그인 없음·3P 제공자·게이트웨이·API 키(이 엔드포인트는 구독 OAuth 전용): 엔진 값으로 표시.
   // 이전 계정의 조회 값이 남아 계속 보이지 않게 비운다.
@@ -391,9 +401,7 @@ async function refreshClaude($: EngineInterface): Promise<void> {
     const limits = c.limits
     if (at && limits && limits.length > 0) await update($, claudeApi, cur => (cur && cur.fetchedAt >= at ? cur : { fetchedAt: at, limits }))
   }
-  const fresh = cache.fetchedAt !== undefined && now - cache.fetchedAt < CLAUDE_POLL_MS
-  const waiting = now < Math.max(cache.nextAt ?? 0, memNextAt) || now - inFlightSince < CLAUDE_INFLIGHT_MAX_MS
-  if (fresh || waiting) {
+  if (skipFetch(cache, now, memNextAt, inFlightSince, force)) {
     await showCache(cache)
     return
   }
@@ -527,8 +535,8 @@ export function pickLimits(engine: Usage | null, api: ClaudeLimits | null, now: 
 }
 
 // 1분 주기 작업. 하나가 실패해도 나머지는 돈다.
-async function refreshAll($: EngineInterface): Promise<void> {
-  await Promise.allSettled([measureCtx($, true), refreshClaude($), refreshCodex($)])
+async function refreshAll($: EngineInterface, sessionStart = false): Promise<void> {
+  await Promise.allSettled([measureCtx($, true), refreshClaude($, sessionStart), refreshCodex($)])
 }
 
 // 막대에 쓸 값: used = 모델 창 대비 %, colorPct = 색 기준(압축 창이 있으면 그 창 대비), markPct = 압축 지점 눈금
@@ -659,7 +667,7 @@ export const register: Register = on => {
     // 타이머 먼저 등록하고, 첫 조회는 기다리지 않는다(첫 프롬프트를 늦추지 않도록)
     $.clock.every(CODEX_POLL_MS, () => { void refreshAll($) })
     $.clock.every(CTX_POLL_MS, () => { void measureCtx($, false).catch(() => undefined) })
-    void refreshAll($)
+    void refreshAll($, true)
     return r
   })
 

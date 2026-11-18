@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 
-import { ROW_RESERVE, TOGGLE_CELLS, bar, buildUsage, cellWidth, ctxView, fitLevel, nextBackoff, nextCtxLimit, parseClaudeUsage, pickLimits, rowText, sanitizeCache } from './register'
+import { ROW_RESERVE, TOGGLE_CELLS, bar, buildUsage, cellWidth, ctxView, fitLevel, nextBackoff, nextCtxLimit, parseClaudeUsage, pickLimits, rowText, sanitizeCache, skipFetch } from './register'
 import type { RowSpec } from './register'
 
 test('실패 대기는 2분부터 두 배씩, 최대 30분', async () => {
@@ -247,4 +247,19 @@ test('터미널 밴드는 폭이 좁아질수록 리셋 시각 → ctx 괄호 �
   expect((await bandAt($, 90))[0]).toBe('Claude 5h:75% (03:00) | 7d:31% (2d 13:00) | ctx 22% (223K / 1.0M · 압축 400K)')
   expect((await bandAt($, 70))[0]).toBe('Claude 5h:75% (03:00) | 7d:31% (2d 13:00) | ctx 22%')
   expect(await bandAt($, 50)).toEqual(['Claude 5h:75% | 7d:31% | ctx 22%', 'Codex  5h:75% (03:00) | 7d:92% (2d 13:00)'])
+})
+
+test('skipFetch: 세션 시작은 주기·백오프를 건너뛰고, 방금 받은 값·진행 중 조회만 존중', () => {
+  const now = 10_000_000
+  // 평소: 1분 안 값이면 쉬고, 백오프(nextAt) 중이면 쉰다
+  expect(skipFetch({ fetchedAt: now - 30_000 }, now, 0, 0, false)).toBe(true)
+  expect(skipFetch({ fetchedAt: now - 600_000, nextAt: now + 900_000 }, now, 0, 0, false)).toBe(true)
+  expect(skipFetch({ fetchedAt: now - 600_000 }, now, 0, 0, false)).toBe(false)
+  // 세션 시작: 30초 전 값·백오프 중이어도 묻는다
+  expect(skipFetch({ fetchedAt: now - 30_000 }, now, 0, 0, true)).toBe(false)
+  expect(skipFetch({ fetchedAt: now - 600_000, nextAt: now + 900_000 }, now, now + 900_000, 0, true)).toBe(false)
+  expect(skipFetch({}, now, 0, 0, true)).toBe(false)
+  // 세션 시작이어도 10초 안 값이 있거나 조회가 진행 중이면 묻지 않는다
+  expect(skipFetch({ fetchedAt: now - 5_000 }, now, 0, 0, true)).toBe(true)
+  expect(skipFetch({ fetchedAt: now - 600_000 }, now, 0, now - 1_000, true)).toBe(true)
 })
